@@ -1,4 +1,7 @@
+import os
+
 from celery import Celery
+
 
 def create_celery(app):
     """
@@ -13,3 +16,7 @@ def create_celery(app):
     celery.config_from_object(app.config)
 
     return celery
+
+
+def get_redis_url() -> str:
+    return os.getenv("REDIS_URL", "redis://localhost:6379/0")

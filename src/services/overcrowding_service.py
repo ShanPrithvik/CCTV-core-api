@@ -7,15 +7,34 @@ from ultralytics import YOLO
 from ultralytics.utils import LOGGER
 from src.celery_worker import celery
 from celery.contrib.abortable import AbortableTask
-import winsound
 import collections
 from src.services.local_storage import save_video_clip_async
+from src.services.stream_utils import (
+    display_frame,
+    setup_window,
+    teardown_windows,
+    alert_beep,
+)
 
 LOGGER.setLevel("ERROR")
 sys.stdout = open(os.devnull, "w")
 sys.stdout = sys.__stdout__
 
-model = YOLO('src/trained-models/yolov8m.pt')
+_model = None
+
+
+def get_model():
+    """Lazily load the person-detection model so a missing weight file only
+    fails this task, instead of crashing the whole Celery worker on import."""
+    global _model
+    if _model is None:
+        model_path = os.getenv("CROWD_MODEL_PATH", "yolov8n.pt")
+        _model = YOLO(model_path)
+    return _model
+
+
+DETECTION_FRAME_SKIP = max(1, int(os.getenv("DETECTION_FRAME_SKIP", "3")))
+
 
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_detect_overcrowding")
 def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
@@ -26,6 +45,8 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
     cap = None
 
     try:
+        model = get_model()
+
         cap = cv2.VideoCapture(rtsp_url)
         if not cap.isOpened():
             raise RuntimeError(f"Error: Unable to open video stream from {rtsp_url}")
@@ -34,9 +55,9 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
-        
-        # Setup display window
-        cv2.namedWindow("Overcrowding Monitoring", cv2.WINDOW_NORMAL)
+
+        # Setup display window (no-op when running headless on a server)
+        setup_window("Overcrowding Monitoring")
 
         # Create a mask for the ROI
         mask = np.zeros((720, 1280), dtype=np.uint8)
@@ -57,7 +78,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
         frames_to_save = []
         save_start_frame_count = 0
         frame_count = 0
-        output_folder = "saved_clips"
+        output_folder = os.getenv("SAVED_CLIPS_DIR", "saved_clips")
         os.makedirs(output_folder, exist_ok=True)
  
         # Extract rule types values
@@ -72,6 +93,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
         # Variables for tracking overcrowding
         alert_timer = None
         alert_active = False
+        person_count = 0  # cached across skipped frames
 
         while True:
 
@@ -94,26 +116,26 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
             # Draw the ROI polygon on the frame
             cv2.polylines(frame, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
 
+            # Run YOLO detection every Nth frame to keep up on CPU; reuse the
+            # last known count on skipped frames.
+            if frame_count % DETECTION_FRAME_SKIP == 0:
+                results = model(frame)
 
-            # Run YOLO detection
-            results = model(frame)
+                person_count = 0
+                for result in results:
+                    for box in result.boxes:
+                        rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
+                        label = model.names[int(box.cls[0])]
 
-            # Count the number of people inside the ROI
-            person_count = 0
-            for result in results:
-                for box in result.boxes:
-                    rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
-                    label = model.names[int(box.cls[0])]
+                        if label == "person":
+                            center_x = (rx1 + rx2) // 2
+                            center_y = (ry1 + ry2) // 2
 
-                    if label == "person":
-                        center_x = (rx1 + rx2) // 2
-                        center_y = (ry1 + ry2) // 2
+                            if mask[center_y, center_x] > 0:
+                                person_count += 1
 
-                        if mask[center_y, center_x] > 0:
-                            person_count += 1
-
-                            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
-                            cv2.putText(frame, label, (rx1, ry1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                                cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+                                cv2.putText(frame, label, (rx1, ry1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
                             
             if person_count > max_people:
@@ -165,19 +187,18 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                     print(f"Saving asynchronously: {filename}")
                     frames_to_save.clear()
  
-        # ✅ Blinking alert overlay (outside the logic above)
+        # Blinking alert overlay (outside the logic above)
             if alert_active:
                 current_time = time.time()
                 if int(current_time) % 2 == 0:  # Blink every 2 seconds
                     cv2.putText(frame, "ALERT: Overcrowding Detected!", (30, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 3)
-                    winsound.Beep(1000, 1000)
+                    alert_beep(1000, 1000)
  
- 
-            # Show window
-            cv2.imshow("Overcrowding Monitoring", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("🟡 User quit with 'q'.")
+
+            # Show window (desktop) or publish frame for live streaming (headless)
+            if display_frame("Overcrowding Monitoring", frame, camera_id=camera_id):
+                print("User quit with 'q'.")
                 break
 
     except Exception as e:
@@ -186,5 +207,5 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
     finally:
         if cap is not None:  # Only release cap if it was initialized
             cap.release()
-        cv2.destroyAllWindows()
+        teardown_windows()
         print("Stopped overcrowding detection.")

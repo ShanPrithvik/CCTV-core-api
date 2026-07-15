@@ -1,6 +1,6 @@
 # CCTV Core API
 
-Backend service for an AI-powered CCTV surveillance system. It manages cameras and per-camera detection rules, and runs real-time video analytics on RTSP streams using [YOLOv8](https://github.com/ultralytics/ultralytics). Detection jobs run asynchronously as [Celery](https://docs.celeryq.dev/) tasks so that multiple camera streams can be monitored in parallel without blocking the API.
+Backend service for an AI-powered CCTV surveillance system. It manages cameras and per-camera detection rules, and runs real-time video analytics on RTSP streams using [YOLOv8](https://github.com/ultralytics/ultralytics). Detection jobs run asynchronously as [Celery](https://docs.celeryq.dev/) tasks so that multiple camera streams can be monitored in parallel without blocking the API. It runs headless by default, so it works on a server/container with no display, and streams live annotated detection frames back to the frontend over HTTP.
 
 ## Features
 
@@ -10,15 +10,17 @@ Backend service for an AI-powered CCTV surveillance system. It manages cameras a
   - `CROWD_DETECTION` — overcrowding detection inside an ROI, with a configurable person count and alert timeout.
   - `RESTRICTED_AREA` — alerts when any person/object enters a defined ROI.
   - `SHOPLIFTING` — shoplifting detection using a custom-trained model.
+- **Live view** — while a rule is running, the worker publishes the latest annotated frame (ROI, boxes, alert overlays) to Redis; `GET /api/camera/<id>/stream` serves it as an MJPEG stream a browser `<img>` tag can render directly.
 - **Automatic clip saving** — when an alert triggers, a short pre-/post-roll video clip is saved (FFmpeg with an OpenCV fallback).
 - **Alert logging** — alerts are appended to text logs under `logs/`.
+- **Headless by default** — no desktop windows or Windows-only audio calls at runtime; everything is env-configurable for containers/servers.
 
 ## Tech stack
 
-- **Flask** — REST API (with Flask-CORS, Flask-SQLAlchemy, Flask-Marshmallow)
-- **Celery + Redis** — asynchronous task queue / broker / result backend
-- **MySQL** — persistent storage for cameras and rules
-- **OpenCV + Ultralytics YOLOv8 + PyTorch** — video capture and inference
+- **Flask** — REST API (with Flask-CORS, Flask-SQLAlchemy, Flask-Marshmallow), served by **gunicorn** in production
+- **Celery + Redis** — asynchronous task queue / broker / result backend, and the transport for live-view frames
+- **SQLite** (default) or **MySQL** (opt-in) — persistent storage for cameras and rules
+- **OpenCV + Ultralytics YOLOv8 + PyTorch** — video capture and inference (`yolov8n` by default for CPU-friendly deployments)
 
 ## Project structure
 
@@ -26,32 +28,55 @@ Backend service for an AI-powered CCTV surveillance system. It manages cameras a
 CCTV/
 ├── app.py                       # Flask app entrypoint + Celery config
 ├── requirements.txt
+├── Dockerfile                   # CPU/headless image (api + worker share it)
+├── docker-compose.yml           # api, worker, redis, mediamtx + demo publisher
 ├── logs/                        # Alert logs (generated at runtime)
 ├── saved_clips/                 # Saved alert video clips (generated at runtime)
 └── src/
-    ├── init.py                  # App factory, DB/Marshmallow init
+    ├── init.py                  # App factory, DB/Marshmallow init, CORS
     ├── routes.py                # Blueprint registration
-    ├── celery_worker.py         # Celery app + task autodiscovery
+    ├── celery_worker.py         # Celery app + task registration
     ├── config/
-    │   ├── db_config.py         # MySQL connection config (env-driven)
+    │   ├── db_config.py         # SQLite (default) / MySQL config, env-driven
     │   └── celery_config.py     # Celery factory
-    ├── controllers/             # HTTP route handlers (camera, rule)
-    ├── services/                # Business logic + detection tasks
+    ├── controllers/             # HTTP route handlers (camera, rule, live stream)
+    ├── services/
+    │   ├── stream_utils.py      # Headless mode + Redis live-frame publish/read
+    │   ├── overcrowding_service.py
+    │   ├── restricted_area_service.py
+    │   ├── shoplifting_service.py
+    │   ├── camera_service.py / local_storage.py / image_capture.py
+    │   └── rule_service.py
     ├── models/                  # SQLAlchemy models (Camera, RuleConfig, RuleTypes)
     └── enum/model_types.py      # Supported detection model types
 ```
 
-## Prerequisites
+## Quick start: Docker (recommended)
+
+This brings up the API, a Celery worker, Redis, and a self-contained fake RTSP camera (a looped synthetic test pattern via [MediaMTX](https://github.com/bluenviron/mediamtx) + ffmpeg) — no external camera or manual service setup required.
+
+```bash
+cp .env.example .env
+docker compose up --build
+```
+
+- API: `http://localhost:5000`
+- Demo camera RTSP URL (use this when adding a camera from the frontend): `rtsp://mediamtx:8554/demo`
+  - Note: this URL only resolves *inside* the Docker network. The `worker` container reads it directly; that's all that matters for detection to run.
+- The demo feed is a synthetic test pattern (no real people/objects), so it proves the pipeline end-to-end (stream in → detection runs → live view works) but won't produce real crowd/restricted-area alerts. Swap in a real camera's `rtsp://` URL to see real detections.
+- `yolov8n.pt` is downloaded automatically by Ultralytics on first use — no manual model setup needed for `CROWD_DETECTION` / `RESTRICTED_AREA`.
+- `SHOPLIFTING` requires the custom `shoplifting_best.pt` weight, which is **not** included. Mount it if you have it (see the commented-out volume line in `docker-compose.yml`); without it, only shoplifting rules will fail (crowd/restricted-area are unaffected).
+
+## Manual setup (without Docker)
+
+### Prerequisites
 
 - Python 3.10+
-- MySQL server (a database named `cctv_db` by default)
-- Redis server (for Celery)
+- Redis server (for Celery and live-view frames)
 - FFmpeg on your `PATH` (recommended for clip encoding; falls back to OpenCV)
-- YOLOv8 model weights (see [Model weights](#model-weights))
+- MySQL, only if you set `DB_ENGINE=mysql` (SQLite is the default, zero setup)
 
-> **Note:** the detection tasks use OpenCV display windows (`cv2.imshow`) and, for overcrowding, `winsound` (Windows-only) for the audible alert. Running the worker on a machine with a display is recommended; on Linux/macOS the `winsound` beep is not available.
-
-## Setup
+### Setup
 
 1. **Clone and enter the repo**
 
@@ -70,60 +95,53 @@ pip install -r requirements.txt
 
 3. **Configure environment variables**
 
-Copy the example file and fill in your values:
-
 ```bash
 cp .env.example .env
 ```
 
+See [.env.example](.env.example) for the full list. Key ones:
+
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `DB_USER` | MySQL user | `root` |
-| `DB_PASSWORD` | MySQL password | *(empty)* |
-| `DB_HOST` | MySQL host | `localhost` |
-| `DB_PORT` | MySQL port | `3306` |
-| `DB_NAME` | Database name | `cctv_db` |
-| `REDIS_URL` | Redis broker/result backend | `redis://localhost:6379/0` |
+| `DB_ENGINE` | `sqlite` (zero setup) or `mysql` | `sqlite` |
+| `REDIS_URL` | Redis broker/result backend + live-frame store | `redis://localhost:6379/0` |
+| `HEADLESS` | `true`: no desktop windows, publish frames to Redis instead. `false`: open debug preview windows (local machine with a display only) | `true` |
+| `CROWD_MODEL_PATH` / `RESTRICTED_MODEL_PATH` | YOLO weight for person detection; auto-downloads if a standard name like `yolov8n.pt` | `yolov8n.pt` |
+| `SHOPLIFTING_MODEL_PATH` | Custom shoplifting weight (must be provided; no auto-download) | `src/trained-models/shoplifting_best.pt` |
+| `DETECTION_FRAME_SKIP` / `SHOPLIFTING_FRAME_SKIP` | Run inference every Nth frame (higher = lighter on CPU) | `3` / `2` |
+| `CAMERA_SNAPSHOT_DIR` / `SAVED_CLIPS_DIR` | Where snapshots/clips are written | `cctv_snip` / `saved_clips` |
 
-4. **Create the database**
+If using `DB_ENGINE=mysql`, also set `DB_USER`/`DB_PASSWORD`/`DB_HOST`/`DB_PORT`/`DB_NAME` and create the database: `CREATE DATABASE cctv_db;`. Tables are created automatically on startup either way.
 
-```sql
-CREATE DATABASE cctv_db;
+### Running
+
+Start Redis first, then in separate terminals:
+
+```bash
+# 1. Celery worker (runs the detection tasks)
+celery -A src.celery_worker.celery worker --loglevel=info
+
+# 2. Flask API (development)
+python app.py
+
+# 2. Flask API (production, instead of the above)
+gunicorn -w 2 -b 0.0.0.0:5000 app:app
 ```
 
-Tables are created automatically on startup via `db.create_all()`.
+The API runs on `http://localhost:5000` by default.
 
 ## Model weights
 
-Model weights (`*.pt`) are **not** committed to the repo. Place them where the services expect them:
+- `yolov8n.pt` (default for `CROWD_DETECTION` / `RESTRICTED_AREA`) auto-downloads from Ultralytics on first use — nothing to provide. This keeps the default deployment CPU-friendly; swap `CROWD_MODEL_PATH`/`RESTRICTED_MODEL_PATH` to `yolov8m.pt` (or your own weight) for higher accuracy on a GPU/more powerful machine.
+- `SHOPLIFTING` uses a custom-trained weight (`shoplifting_best.pt`) that is **not** included in this repo and has no auto-download. Provide your own at `SHOPLIFTING_MODEL_PATH`. If it's missing, only shoplifting rules fail — crowd/restricted-area detection are unaffected (models load lazily, per-task).
 
-- `src/trained-models/yolov8m.pt` — base YOLOv8 model (overcrowding)
-- `yolov8m.pt` — base YOLOv8 model (restricted area)
-- `src/trained-models/shoplifting_best.pt` — custom shoplifting model
+## Live view
 
-The base `yolov8m.pt` can be downloaded from the [Ultralytics releases](https://github.com/ultralytics/assets/releases). The shoplifting model is a custom-trained weight.
-
-## Running
-
-Start Redis and MySQL first, then in separate terminals:
-
-**1. Celery worker** (runs the detection tasks)
-
-```bash
-celery -A src.celery_worker.celery worker --loglevel=info
-```
-
-**2. Flask API**
-
-```bash
-python app.py
-```
-
-The API runs on `http://localhost:5000`.
+`GET /api/camera/<camera_id>/stream` returns an MJPEG stream (`multipart/x-mixed-replace`) of the latest annotated frame for that camera, as published by whichever detection task is currently running for it. A plain `<img src="...">` tag renders it directly — see the frontend's `LiveView` component. If no rule is running (or `HEADLESS=false`, i.e. frames are shown in a desktop window instead), the endpoint has nothing to stream.
 
 ## API reference
 
-Base URL: `http://localhost:5000`
+Base URL: `http://localhost:5000` (or your deployed API URL)
 
 ### Cameras
 
@@ -134,6 +152,7 @@ Base URL: `http://localhost:5000`
 | `GET` | `/api/camera/<camera_id>` | Get a single camera |
 | `DELETE` | `/api/camera/<camera_id>` | Soft-delete (mark inactive) |
 | `GET` | `/camera-view/<filename>` | Serve a captured camera snapshot |
+| `GET` | `/api/camera/<camera_id>/stream` | Live MJPEG view of the camera's detection output |
 
 ### Rules
 
@@ -142,6 +161,8 @@ Base URL: `http://localhost:5000`
 | `POST` | `/api/camera/<camera_id>/rule` | Create a detection rule for a camera |
 | `GET` | `/api/camera/<camera_id>/rule` | Get active rules for a camera |
 | `DELETE` | `/api/camera/<camera_id>/rule/<rule_id>` | Soft-delete a rule and abort its task |
+
+> Note: there is no `PUT` (update) route for rules yet, even though the frontend has an `updateRule()` call for editing an existing rule. Only create and delete are implemented server-side.
 
 **Example — create a crowd-detection rule:**
 
@@ -173,8 +194,19 @@ POST /api/camera/1/rule
 - `RESTRICTED_AREA` — requires a 4-point `roi`; `ruleTypes` must be empty.
 - `SHOPLIFTING` — `roi` and `ruleTypes` must be empty.
 
+## Deploying for free (single-stream demo)
+
+This backend is well suited to a $0 demo on an [Oracle Cloud "Always Free" ARM VM](https://www.oracle.com/cloud/free/) (Ampere A1, up to 4 OCPU / 24 GB RAM, free indefinitely):
+
+1. Provision the VM, install Docker + the Compose plugin.
+2. `git clone` this repo onto the VM, `cp .env.example .env`, adjust `CORS_ALLOWED_ORIGINS` to your deployed frontend's URL.
+3. `docker compose up -d --build`.
+4. Put the API behind HTTPS (a Caddy reverse proxy with automatic Let's Encrypt certs, or a Cloudflare Tunnel, both free) and point the frontend's `REACT_APP_API_URL` at it.
+
+This is a single-stream, CPU-only (`yolov8n`) setup meant to prove the pipeline works end-to-end — not a substitute for a real multi-camera GPU deployment.
+
 ## Notes
 
-- CORS is enabled for all origins on `/api/*` (tighten before production).
-- Snapshot/clip output paths in `camera_service.py` and `camera_controller.py` currently use Windows-style paths (`D:\CCTV_FE_BE\cctv_snip`); adjust them for your environment.
+- CORS defaults to `*`; set `CORS_ALLOWED_ORIGINS` to your frontend's origin in production.
 - Alerts are written to `logs/overcrowding_alerts.txt` and `logs/restricted_area_alerts.txt`.
+- `HEADLESS=false` (desktop preview windows) is only meaningful on your own machine with a display; servers and containers should always use the default `HEADLESS=true`.

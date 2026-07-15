@@ -1,11 +1,20 @@
-from flask import request, jsonify, Blueprint, send_from_directory
+import os
+import time
+
+from flask import request, jsonify, Blueprint, send_from_directory, Response
 from src.services.camera_service import add_camera_service, get_cameras_service, remove_camera_service, get_camera_service
 from src.models.camera import camera_schema, cameras_schema
+from src.services.stream_utils import get_latest_frame
 
 camera_bp = Blueprint('camera_bp', __name__)
 
-# 🔧 Path where images are stored (adjust if needed)
-IMAGE_DIR = r"D:\CCTV_FE_BE\cctv_snip"
+# Path where camera snapshots are stored (env-configurable; defaults to a
+# local folder so this works out of the box on any OS).
+IMAGE_DIR = os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip")
+
+# How long the MJPEG stream waits for a new frame before giving up (seconds).
+STREAM_POLL_INTERVAL = 0.2
+STREAM_IDLE_TIMEOUT = 15
 
 @camera_bp.route('/api/camera', methods=['POST'])
 def add_camera():
@@ -54,10 +63,49 @@ def remove_camera(camera_id):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
     
-    # ✅ Route to serve camera view images
+    # Route to serve camera view snapshot images
 @camera_bp.route('/camera-view/<filename>', methods=['GET'])
 def serve_camera_image(filename):
     try:
         return send_from_directory(IMAGE_DIR, filename)
     except FileNotFoundError:
         return jsonify({"error": "Image not found"}), 404
+
+
+@camera_bp.route('/api/camera/<int:camera_id>/stream', methods=['GET'])
+def stream_camera(camera_id):
+    """
+    Live MJPEG view of a camera's detection output. While a detection rule
+    is running for this camera, the worker publishes annotated frames (ROI,
+    bounding boxes, alert overlays) to Redis; this endpoint reads the latest
+    one and streams it to the browser as multipart/x-mixed-replace, which
+    a plain <img> tag can render directly.
+    """
+    def generate():
+        last_frame = None
+        idle_since = None
+        while True:
+            frame_bytes = get_latest_frame(camera_id)
+
+            if frame_bytes is None:
+                if last_frame is None:
+                    time.sleep(STREAM_POLL_INTERVAL)
+                    if idle_since is None:
+                        idle_since = time.time()
+                    elif time.time() - idle_since > STREAM_IDLE_TIMEOUT:
+                        # No rule has produced a frame yet; stop holding the connection open.
+                        break
+                    continue
+                # Reuse the last frame briefly if the worker missed a beat.
+                frame_bytes = last_frame
+            else:
+                last_frame = frame_bytes
+                idle_since = None
+
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+            )
+            time.sleep(STREAM_POLL_INTERVAL)
+
+    return Response(generate(), mimetype="multipart/x-mixed-replace; boundary=frame")

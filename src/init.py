@@ -1,3 +1,5 @@
+import os
+
 from flask import Flask
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -10,9 +12,12 @@ def create_app():
     app = Flask(__name__)
 
     app.config.from_object("src.config.db_config.DBConfig")
-    
-    # Enable CORS (allow all origins or specify as needed)
-    CORS(app, resources={r"/api/*": {"origins": "*"}})
+
+    # CORS_ALLOWED_ORIGINS="*" (default, dev-friendly) or a comma-separated
+    # list of allowed origins for production, e.g. "https://myapp.vercel.app"
+    allowed_origins = os.getenv("CORS_ALLOWED_ORIGINS", "*")
+    origins = "*" if allowed_origins == "*" else [o.strip() for o in allowed_origins.split(",")]
+    CORS(app, resources={r"/api/*": {"origins": origins}})
 
     db.init_app(app)
     ma.init_app(app)

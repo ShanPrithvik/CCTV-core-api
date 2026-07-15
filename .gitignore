@@ -24,6 +24,8 @@ logs/*.txt
 saved_clips/*
 !saved_clips/.gitkeep
 cctv_snip/
+*.db
+Ultralytics/
 
 # OS / editor
 .DS_Store

@@ -9,26 +9,41 @@ import sys
 from ultralytics.utils import LOGGER
 from celery.contrib.abortable import AbortableTask
 from src.services.local_storage import save_video_clip_async
+from src.services.stream_utils import display_frame, setup_window, teardown_windows
 
 LOGGER.setLevel("ERROR")
 sys.stdout = open(os.devnull, "w")
 sys.stdout = sys.__stdout__ 
 
-model = YOLO("src/trained-models/shoplifting_best.pt")
-model.conf = 0.7
-# location = "C:\\Users\\Dell\\Downloads\\shop1.mp4"
+_model = None
+
+
+def get_model():
+    """Lazily load the custom shoplifting model so a missing weight file
+    only fails this task, instead of crashing the whole Celery worker."""
+    global _model
+    if _model is None:
+        model_path = os.getenv("SHOPLIFTING_MODEL_PATH", "src/trained-models/shoplifting_best.pt")
+        _model = YOLO(model_path)
+        _model.conf = 0.7
+    return _model
+
+
+SHOPLIFTING_FRAME_SKIP = max(1, int(os.getenv("SHOPLIFTING_FRAME_SKIP", "2")))
+
 
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_detect_shoplifting")
-def detect_shoplifting_async(self, rtsp_url):
+def detect_shoplifting_async(self, rtsp_url, camera_id=None):
     print(f"Starting detect shoplifting for {rtsp_url}")
     cap = None
 
     try:
+        model = get_model()
 
         cap = cv2.VideoCapture(rtsp_url)
         if not cap.isOpened():
             print("Error: Could not open video stream.")
-            exit()
+            return
             
         # Get video properties
         FRAME_RATE = int(cap.get(cv2.CAP_PROP_FPS) or 0)
@@ -47,14 +62,13 @@ def detect_shoplifting_async(self, rtsp_url):
         frames_to_save = []
         save_start_frame_count = 0
 
-        output_folder = "saved_clips"
+        output_folder = os.getenv("SAVED_CLIPS_DIR", "saved_clips")
         os.makedirs(output_folder, exist_ok=True)
 
         frame_count = 0
 
-        cv2.namedWindow("Shoplifting Detection", cv2.WINDOW_AUTOSIZE)
-        cv2.moveWindow("Shoplifting Detection", 0, 0)
-        cv2.startWindowThread()  # For better window handling on Windows
+        # Desktop preview window (no-op when running headless on a server)
+        setup_window("Shoplifting Detection", cv2.WINDOW_AUTOSIZE)
         
         while cap.isOpened():
             # Check if the task has been aborted
@@ -70,8 +84,8 @@ def detect_shoplifting_async(self, rtsp_url):
             frame_count += 1
             video_queue.append(frame)
 
-            # Process model every 2 frames to reduce load
-            if frame_count % 2 == 0:
+            # Process model every Nth frame to reduce load
+            if frame_count % SHOPLIFTING_FRAME_SKIP == 0:
                 results = model(frame)
             else:
                 results = []  # Empty results for non-processing frames
@@ -96,14 +110,9 @@ def detect_shoplifting_async(self, rtsp_url):
                             save_start_frame_count = frame_count  # Mark the frame where detection started
 
 
-            # Show video frame
-            cv2.imshow("Shoplifting Detection", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            # Show window (desktop) or publish frame for live streaming (headless)
+            if display_frame("Shoplifting Detection", frame, camera_id=camera_id):
                 print("User quit with 'q'.")
-                break
-            # Check if window is closed
-            if cv2.getWindowProperty("Shoplifting Detection", cv2.WND_PROP_VISIBLE) < 1:
-                print("Window closed by user.")
                 break
 
             if recording:
@@ -136,5 +145,5 @@ def detect_shoplifting_async(self, rtsp_url):
     finally:
         if cap is not None:  # Only release cap if it was initialized
             cap.release()
-        cv2.destroyAllWindows()
+        teardown_windows()
         print("Stopped shoplifting detection.")

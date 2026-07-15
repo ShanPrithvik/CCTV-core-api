@@ -9,13 +9,27 @@ from src.celery_worker import celery
 from celery.contrib.abortable import AbortableTask
 import collections
 from src.services.local_storage import save_video_clip_async
+from src.services.stream_utils import display_frame, setup_window, teardown_windows
 
 LOGGER.setLevel("ERROR")
 sys.stdout = open(os.devnull, "w")
 sys.stdout = sys.__stdout__
 
-model = YOLO('yolov8m.pt')
-# location = "C:\Users\Dell\Downloads\shop1.mp4"
+_model = None
+
+
+def get_model():
+    """Lazily load the model so a missing weight file only fails this task,
+    instead of crashing the whole Celery worker on import."""
+    global _model
+    if _model is None:
+        model_path = os.getenv("RESTRICTED_MODEL_PATH", "yolov8n.pt")
+        _model = YOLO(model_path)
+    return _model
+
+
+DETECTION_FRAME_SKIP = max(1, int(os.getenv("DETECTION_FRAME_SKIP", "3")))
+
 
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_restricted_area")
 def restricted_area_async(self, rtsp_url, camera_id, roi):
@@ -26,6 +40,8 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
     cap = None
 
     try:
+        model = get_model()
+
         cap = cv2.VideoCapture(rtsp_url)
         if not cap.isOpened():
             raise RuntimeError(f"Error: Unable to open video stream from {rtsp_url}")
@@ -35,8 +51,8 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
         except Exception:
             pass
          
-        # 👇 Create a display window
-        cv2.namedWindow("Restricted Area Monitoring", cv2.WINDOW_NORMAL)
+        # Create a display window (no-op when running headless on a server)
+        setup_window("Restricted Area Monitoring")
 
         # Create a mask for the ROI
         mask = np.zeros((720, 1280), dtype=np.uint8)
@@ -57,7 +73,7 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
         frames_to_save = []
         save_start_frame_count = 0
         frame_count = 0
-        output_folder = "saved_clips"
+        output_folder = os.getenv("SAVED_CLIPS_DIR", "saved_clips")
         os.makedirs(output_folder, exist_ok=True)
 
         while True:
@@ -80,33 +96,34 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
             # Draw the ROI polygon on the frame
             cv2.polylines(frame, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
 
-            # Run YOLO detection
-            results = model(frame)
+            # Run YOLO detection every Nth frame to keep up on CPU
+            if frame_count % DETECTION_FRAME_SKIP == 0:
+                results = model(frame)
 
-            # Process detection results
-            for result in results:
-                for box in result.boxes:
-                    rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
-                    label = model.names[int(box.cls[0])]
+                # Process detection results
+                for result in results:
+                    for box in result.boxes:
+                        rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
+                        label = model.names[int(box.cls[0])]
 
-                    # Check if the object is inside the ROI
-                    center_x = (rx1 + rx2) // 2
-                    center_y = (ry1 + ry2) // 2
+                        # Check if the object is inside the ROI
+                        center_x = (rx1 + rx2) // 2
+                        center_y = (ry1 + ry2) // 2
 
-                    if mask[center_y, center_x] > 0:
-                        # Draw bounding box and log alert
-                        cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
-                        cv2.putText(frame, f"ALERT: {label} in restricted area", (rx1, ry1 - 10),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                        message = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - ALERT: {label} detected in restricted area for Camera {camera_id}"
-                        print(message)
-                        with open(log_file_path, "a") as f:
-                            f.write(message + "\n")
-                        # Start recording with pre-roll if not already recording
-                        if not recording:
-                            recording = True
-                            frames_to_save = list(video_queue)
-                            save_start_frame_count = frame_count
+                        if mask[center_y, center_x] > 0:
+                            # Draw bounding box and log alert
+                            cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
+                            cv2.putText(frame, f"ALERT: {label} in restricted area", (rx1, ry1 - 10),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+                            message = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - ALERT: {label} detected in restricted area for Camera {camera_id}"
+                            print(message)
+                            with open(log_file_path, "a") as f:
+                                f.write(message + "\n")
+                            # Start recording with pre-roll if not already recording
+                            if not recording:
+                                recording = True
+                                frames_to_save = list(video_queue)
+                                save_start_frame_count = frame_count
 
 
             # Handle recording post-roll and asynchronous save
@@ -128,10 +145,9 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
                     print(f"Saving asynchronously: {filename}")
                     frames_to_save.clear()
 
-            # ✅ Show video frame (outside detection loop)
-            cv2.imshow("Restricted Area Monitoring", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("🟡 User quit with 'q'.")
+            # Show window (desktop) or publish frame for live streaming (headless)
+            if display_frame("Restricted Area Monitoring", frame, camera_id=camera_id):
+                print("User quit with 'q'.")
                 break
 
     except Exception as e:
@@ -140,5 +156,5 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
     finally:
         if cap is not None:  # Only release cap if it was initialized
             cap.release()
-        cv2.destroyAllWindows()
+        teardown_windows()
         print("Stopped restricted area monitoring.")

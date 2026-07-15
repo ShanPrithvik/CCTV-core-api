@@ -1,11 +1,18 @@
+import os
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from src.init import create_app
-from src.config.celery_config import create_celery
 
 app = create_app()
 
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+
 app.config.update(
-    broker_url="redis://localhost:6379/0",
-    result_backend="redis://localhost:6379/0",
+    broker_url=REDIS_URL,
+    result_backend=REDIS_URL,
     task_serializer="json",
     accept_content=["json"],
     timezone="UTC",
@@ -13,5 +20,9 @@ app.config.update(
 )
 
 if __name__ == '__main__':
-    app.run(debug=True, port = 5000)
-
+    # For local development only. In production, run with gunicorn instead:
+    #   gunicorn -w 2 -b 0.0.0.0:5000 app:app
+    debug = os.getenv("FLASK_DEBUG", "false").strip().lower() in ("1", "true", "yes")
+    host = os.getenv("FLASK_HOST", "0.0.0.0")
+    port = int(os.getenv("FLASK_PORT", "5000"))
+    app.run(debug=debug, host=host, port=port)

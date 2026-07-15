@@ -1,0 +1,80 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    ports:
+      - "8554:8554"
+
+  # Demo-only: loops a synthetic test pattern into MediaMTX as a fake RTSP
+  # camera, so the whole pipeline can be exercised with zero external setup.
+  # Add a camera with RTSP URL rtsp://mediamtx:8554/demo to use it, or skip
+  # this service entirely and point a camera at a real RTSP URL instead.
+  demo-publisher:
+    image: jrottenberg/ffmpeg:6-alpine
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    entrypoint: ["ffmpeg"]
+    command:
+      - -re
+      - -stream_loop
+      - "-1"
+      - -f
+      - lavfi
+      - -i
+      - testsrc=size=1280x720:rate=25
+      - -pix_fmt
+      - yuv420p
+      - -c:v
+      - libx264
+      - -preset
+      - veryfast
+      - -tune
+      - zerolatency
+      - -f
+      - rtsp
+      - rtsp://mediamtx:8554/demo
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - SQLITE_PATH=/app/data/cctv.db
+    ports:
+      - "5000:5000"
+    depends_on:
+      - redis
+    volumes:
+      - cctv-db:/app/data
+      - cctv-snip:/app/cctv_snip
+      - cctv-logs:/app/logs
+      # If you have the custom shoplifting weight, mount it read-only:
+      # - ./models/shoplifting_best.pt:/app/src/trained-models/shoplifting_best.pt:ro
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    command: ["celery", "-A", "src.celery_worker.celery", "worker", "--loglevel=info", "--concurrency=2"]
+    depends_on:
+      - redis
+    volumes:
+      - cctv-snip:/app/cctv_snip
+      - cctv-clips:/app/saved_clips
+      - cctv-logs:/app/logs
+      - model-cache:/root/.cache
+      # - ./models/shoplifting_best.pt:/app/src/trained-models/shoplifting_best.pt:ro
+
+volumes:
+  cctv-db:
+  cctv-snip:
+  cctv-clips:
+  cctv-logs:
+  model-cache:

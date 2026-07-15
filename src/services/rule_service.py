@@ -117,7 +117,7 @@ def save_rule_for_camera(camera_id, data):
                 db.session.commit()
 
             try:
-                task = detect_shoplifting_async.delay(camera.rtsp_url)
+                task = detect_shoplifting_async.delay(camera.rtsp_url, camera_id)
                 new_rule_config.task_id = task.id
                 db.session.commit()
             except Exception as e:

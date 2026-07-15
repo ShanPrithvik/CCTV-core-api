@@ -9,8 +9,9 @@ def add_camera_service(camera_name, rtsp_url):
     """Creates a new Camera record and commits it to the database."""
     # Local file name and local file path
     file_name = f"{camera_name}.png"
-    local_directory = r"D:\CCTV_FE_BE\cctv_snip"
-    camera_view_url = f"http://localhost:5000/camera-view/{camera_name}.png"
+    local_directory = os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip")
+    base_url = os.getenv("API_BASE_URL", "http://localhost:5000")
+    camera_view_url = f"{base_url}/camera-view/{camera_name}.png"
 
     # Create database record
     new_camera = Camera(camera_name=camera_name, rtsp_url=rtsp_url, view=camera_view_url)

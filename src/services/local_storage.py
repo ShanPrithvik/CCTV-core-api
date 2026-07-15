@@ -11,7 +11,7 @@ except Exception:
     cv2 = None
 
 
-def save_to_local_storage(screenshot_buffer: BytesIO, file_name, save_directory=r"D:\CCTV_FE_BE\cctv_snip"):
+def save_to_local_storage(screenshot_buffer: BytesIO, file_name, save_directory=None):
     """
     Saves an in-memory file (BytesIO buffer) to the specified local file system path.
 
@@ -22,6 +22,9 @@ def save_to_local_storage(screenshot_buffer: BytesIO, file_name, save_directory=
 
     This function writes the buffer content to a file at the given path.
     """
+    if save_directory is None:
+        save_directory = os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip")
+
     # Ensure the save directory exists
     os.makedirs(save_directory, exist_ok=True)
 

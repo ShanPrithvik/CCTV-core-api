@@ -1,17 +1,24 @@
 flask
 flask-cors
-flask-mysql
-Flask-MySQLdb
-python_dotenv
+flask-sqlalchemy
 flask-marshmallow
 marshmallow-sqlalchemy
-opencv-python
+python-dotenv
+gunicorn
+
+# opencv-python-headless has no GUI/display dependencies, which matches the
+# HEADLESS-by-default detection services and is what most servers/containers
+# need. If you want desktop preview windows (HEADLESS=false) on your own
+# machine, swap this for the regular `opencv-python` package instead.
+opencv-python-headless
+Pillow
 ultralytics
-flask-sqlalchemy
-celery
-redis
 torch
 torchvision
-google-auth
-google-auth-oauthlib
-google-api-python-client
+
+celery
+redis
+
+# Only needed if DB_ENGINE=mysql (default is DB_ENGINE=sqlite, no extra
+# driver required). Uncomment if you switch to MySQL:
+# mysqlclient

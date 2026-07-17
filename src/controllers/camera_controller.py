@@ -2,6 +2,7 @@ import os
 import time
 
 from flask import request, jsonify, Blueprint, send_from_directory, Response
+from werkzeug.exceptions import NotFound
 from src.services.camera_service import add_camera_service, get_cameras_service, remove_camera_service, get_camera_service
 from src.models.camera import camera_schema, cameras_schema
 from src.services.stream_utils import get_latest_frame
@@ -9,8 +10,11 @@ from src.services.stream_utils import get_latest_frame
 camera_bp = Blueprint('camera_bp', __name__)
 
 # Path where camera snapshots are stored (env-configurable; defaults to a
-# local folder so this works out of the box on any OS).
-IMAGE_DIR = os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip")
+# local folder so this works out of the box on any OS). Resolved to an
+# absolute path (relative to the process CWD, matching how local_storage.py
+# writes files) so Flask's send_from_directory doesn't instead resolve it
+# relative to app.root_path (the src/ package dir), which would never match.
+IMAGE_DIR = os.path.abspath(os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip"))
 
 # How long the MJPEG stream waits for a new frame before giving up (seconds).
 STREAM_POLL_INTERVAL = 0.2
@@ -68,7 +72,7 @@ def remove_camera(camera_id):
 def serve_camera_image(filename):
     try:
         return send_from_directory(IMAGE_DIR, filename)
-    except FileNotFoundError:
+    except (FileNotFoundError, NotFound):
         return jsonify({"error": "Image not found"}), 404
 
 

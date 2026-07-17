@@ -191,8 +191,13 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
             if alert_active:
                 current_time = time.time()
                 if int(current_time) % 2 == 0:  # Blink every 2 seconds
-                    cv2.putText(frame, "ALERT: Overcrowding Detected!", (30, 60),
-                                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 0, 0), 3)
+                    alert_text = "ALERT: Overcrowding Detected!"
+                    font, font_scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 1.0, 3
+                    (text_w, _), _ = cv2.getTextSize(alert_text, font, font_scale, thickness)
+                    # Centered near the top, clear of the top-left corner where
+                    # the frontend overlays its "LIVE" badge on top of the feed.
+                    x = max((frame.shape[1] - text_w) // 2, 0)
+                    cv2.putText(frame, alert_text, (x, 110), font, font_scale, (255, 0, 0), thickness)
                     alert_beep(1000, 1000)
  
 

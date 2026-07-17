@@ -14,8 +14,10 @@ ENV/
 .env.*
 !.env.example
 
-# YOLO / model weights (large binaries — download separately)
+# YOLO / model weights (ignore by default; keep the two runtime models)
 *.pt
+!src/trained-models/yolov8n.pt
+!src/trained-models/shoplifting_best.pt
 *.onnx
 *.engine
 
@@ -26,6 +28,8 @@ saved_clips/*
 cctv_snip/
 *.db
 Ultralytics/
+auto.crt
+auto.key
 
 # OS / editor
 .DS_Store

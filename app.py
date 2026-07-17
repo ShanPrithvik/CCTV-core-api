@@ -25,4 +25,8 @@ if __name__ == '__main__':
     debug = os.getenv("FLASK_DEBUG", "false").strip().lower() in ("1", "true", "yes")
     host = os.getenv("FLASK_HOST", "0.0.0.0")
     port = int(os.getenv("FLASK_PORT", "5000"))
-    app.run(debug=debug, host=host, port=port)
+    # threaded=True is required: the MJPEG live-view endpoint holds a
+    # connection open indefinitely, which would otherwise block every other
+    # request (camera list, rules, etc.) on Werkzeug's single-threaded dev
+    # server for as long as any Live View tab is open.
+    app.run(debug=debug, host=host, port=port, threaded=True)

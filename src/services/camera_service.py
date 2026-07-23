@@ -1,12 +1,17 @@
 from src.models.camera import Camera, db
 from src.services.image_capture import capture_rtsp_screenshot
 from src.services.local_storage import save_to_local_storage
+from src.services.stream_security import validate_stream_url
 
 import os
 
 
 def add_camera_service(camera_name, rtsp_url):
     """Creates a new Camera record and commits it to the database."""
+    # Reject malformed / disallowed stream URLs before we ever open them (SSRF
+    # mitigation). Raises ValueError, which the controller maps to a 400.
+    validate_stream_url(rtsp_url)
+
     # Local file name and local file path
     file_name = f"{camera_name}.png"
     local_directory = os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip")

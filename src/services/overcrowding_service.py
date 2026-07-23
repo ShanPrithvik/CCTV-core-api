@@ -1,7 +1,6 @@
 import cv2
 import time
 import os
-import sys
 import numpy as np
 from ultralytics import YOLO
 from ultralytics.utils import LOGGER
@@ -17,8 +16,6 @@ from src.services.stream_utils import (
 )
 
 LOGGER.setLevel("ERROR")
-sys.stdout = open(os.devnull, "w")
-sys.stdout = sys.__stdout__
 
 _model = None
 

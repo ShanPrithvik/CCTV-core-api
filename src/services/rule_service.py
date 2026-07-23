@@ -1,3 +1,5 @@
+from sqlalchemy.orm import joinedload
+
 from src.models.camera import Camera
 from src.models.ruleConfig import db, RuleConfig
 from src.models.ruleTypes import RuleTypes
@@ -47,25 +49,34 @@ def save_rule_for_camera(camera_id, data):
 
         # Save rule details based on the model type
         if model_type_enum == ModelType.CROWD_DETECTION:
+            if not rules:
+                raise ValueError("At least one rule is required for CROWD_DETECTION")
+
+            # Collect the ROI + rule types that will actually be dispatched to the
+            # worker. Keeping these in explicit locals (instead of relying on the
+            # trailing value of the loop variable) avoids dispatching the wrong
+            # rule's data and the NameError that occurred when `rules` was empty.
+            dispatch_roi = None
+            dispatch_rule_types = []
+
             for rule in rules:
                 roi = rule.get('roi')
-               
                 rule_types = rule.get('ruleTypes', [])
 
                 if not roi or len(roi) != 4:
                     raise ValueError("ROI must have exactly 4 points")
-                
+
                 if not all(isinstance(point, dict) and 'x' in point and 'y' in point for point in roi):
                     raise ValueError("ROI must be an array of objects with 'x' and 'y' properties")
 
                 new_rule_config.roi_coordinates = roi
-                db.session.commit()
+                dispatch_roi = roi
 
                 for rule_type in rule_types:
                     type_name = rule_type.get('type')
                     value = rule_type.get('value')
 
-                    if not type_name or not value:
+                    if type_name is None or value is None:
                         raise ValueError("Rule type and value are required")
 
                     new_rule_type = RuleTypes(
@@ -74,12 +85,12 @@ def save_rule_for_camera(camera_id, data):
                         rule_value=value
                     )
                     db.session.add(new_rule_type)
-                    print(f"Added RuleType: ruleconfig_id={new_rule_config.id}, type={type_name}, value={value}")
+                    dispatch_rule_types.append({"type": type_name, "value": value})
 
-                db.session.commit()
+            db.session.commit()
 
             try:
-                task =  overcrowd_area_async.delay(camera.rtsp_url, camera_id, roi, rule_types)
+                task = overcrowd_area_async.delay(camera.rtsp_url, camera_id, dispatch_roi, dispatch_rule_types)
                 new_rule_config.task_id = task.id
                 db.session.commit()
             except Exception as e:
@@ -97,24 +108,8 @@ def save_rule_for_camera(camera_id, data):
                     raise ValueError("RuleTypes must be empty for SHOPLIFTING model type")
 
                 new_rule_config.roi_coordinates = roi
-                db.session.commit()
 
-                for rule_type in rule_types:
-                    type_name = rule_type.get('type')
-                    value = rule_type.get('value')
-
-                    if not type_name or not value:
-                        raise ValueError("Rule type and value are required")
-
-                    new_rule_type = RuleTypes(
-                        ruleconfig_id=new_rule_config.id,
-                        rule_type=type_name,
-                        rule_value=value
-                    )
-                    db.session.add(new_rule_type)
-                    print(f"Added RuleType: ruleconfig_id={new_rule_config.id}, type={type_name}, value={value}")
-
-                db.session.commit()
+            db.session.commit()
 
             try:
                 task = detect_shoplifting_async.delay(camera.rtsp_url, camera_id)
@@ -125,9 +120,13 @@ def save_rule_for_camera(camera_id, data):
                 traceback.print_exc()
 
         elif model_type_enum == ModelType.RESTRICTED_AREA:
+            if not rules:
+                raise ValueError("At least one rule is required for RESTRICTED_AREA")
+
+            dispatch_roi = None
+
             for rule in rules:
                 roi = rule.get('roi')
-
                 rule_types = rule.get('ruleTypes', [])
 
                 if not roi or len(roi) != 4:
@@ -138,10 +137,12 @@ def save_rule_for_camera(camera_id, data):
                     raise ValueError("RuleTypes must be empty for RESTRICTED AREA model type")
 
                 new_rule_config.roi_coordinates = roi
-                db.session.commit()
+                dispatch_roi = roi
+
+            db.session.commit()
 
             try:
-                task = restricted_area_async.delay(camera.rtsp_url, camera_id, roi)
+                task = restricted_area_async.delay(camera.rtsp_url, camera_id, dispatch_roi)
                 new_rule_config.task_id = task.id
                 db.session.commit()
             except RuntimeError as e:
@@ -169,15 +170,21 @@ def get_rule_for_camera(camera_id: str):
     if not camera:
         raise ValueError("Camera not found")
      
-    rules = RuleConfig.query.filter_by(camera_id=camera_id, status='Active').all()
+    # Eager-load rule_types in a single query (joinedload) instead of issuing a
+    # separate RuleTypes query per rule (the previous N+1 pattern).
+    rules = (
+        RuleConfig.query
+        .options(joinedload(RuleConfig.rule_types))
+        .filter_by(camera_id=camera_id, status='Active')
+        .all()
+    )
 
     if not rules:
         return ({"camera_id": camera_id, "rules": []})
 
     rules_data = []
     for rule in rules:
-        rule_types_config = RuleTypes.query.filter_by(ruleconfig_id=rule.id).all()
-        rule_types_data = [{"type": rt.rule_type, "value": rt.rule_value} for rt in rule_types_config]
+        rule_types_data = [{"type": rt.rule_type, "value": rt.rule_value} for rt in rule.rule_types]
 
         rule_temp = {
             "roi": rule.roi_coordinates,

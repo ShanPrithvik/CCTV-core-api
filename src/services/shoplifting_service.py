@@ -5,15 +5,12 @@ import collections
 import os
 from ultralytics import YOLO
 import time
-import sys
 from ultralytics.utils import LOGGER
 from celery.contrib.abortable import AbortableTask
 from src.services.local_storage import save_video_clip_async
 from src.services.stream_utils import display_frame, setup_window, teardown_windows
 
 LOGGER.setLevel("ERROR")
-sys.stdout = open(os.devnull, "w")
-sys.stdout = sys.__stdout__ 
 
 _model = None
 

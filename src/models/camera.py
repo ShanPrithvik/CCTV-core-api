@@ -1,4 +1,7 @@
+from marshmallow import fields
+
 from ..init import db, ma
+from ..services.stream_security import mask_credentials
 
 class Camera(db.Model):
     __tablename__ = 'Camera'
@@ -19,6 +22,9 @@ class Camera(db.Model):
 class CameraSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
         model = Camera
+
+    # Never expose embedded RTSP credentials in API responses; mask user:pass.
+    rtsp_url = fields.Function(lambda obj: mask_credentials(obj.rtsp_url))
 
 camera_schema = CameraSchema()
 cameras_schema = CameraSchema(many=True)

@@ -36,6 +36,8 @@ def add_camera():
             "message": "Camera added successfully",
             "camera": camera_schema.dump(new_camera)
         }), 201
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -50,7 +52,6 @@ def get_cameras():
 @camera_bp.route('/api/camera/<int:camera_id>', methods=['GET'])
 def get_camera(camera_id):
     try:
-        print (camera_id)
         cameras = get_camera_service(camera_id)
         return jsonify(camera_schema.dump(cameras)), 200
     except Exception as e:

@@ -1,0 +1,16 @@
+# Database migrations (Flask-Migrate / Alembic)
+#
+# First-time / existing SQLite demo DB already stamped at head.
+# After changing SQLAlchemy models:
+#
+#   export FLASK_APP=app.py
+#   export AUTO_CREATE_TABLES=false
+#   flask db migrate -m "describe the change"
+#   flask db upgrade
+#
+# Fresh empty database:
+#
+#   AUTO_CREATE_TABLES=false flask db upgrade
+#
+# The app still calls create_all() when AUTO_CREATE_TABLES=true so
+# `python app.py` works for local demo without an extra migrate step.

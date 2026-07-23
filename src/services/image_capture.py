@@ -1,3 +1,14 @@
+import os
+
+# Bound how long FFmpeg (OpenCV's backend) waits when opening/reading a stream,
+# so a dead or malicious camera cannot hang the synchronous add-camera request
+# indefinitely. FFmpeg's "timeout" option is in microseconds. Must be set before
+# cv2 opens any capture, hence at import time.
+_STREAM_TIMEOUT_MS = int(os.getenv("STREAM_TIMEOUT_MS", "10000"))
+os.environ.setdefault(
+    "OPENCV_FFMPEG_CAPTURE_OPTIONS", f"timeout;{_STREAM_TIMEOUT_MS * 1000}"
+)
+
 import cv2
 import numpy as np
 from io import BytesIO
@@ -14,8 +25,9 @@ def capture_rtsp_screenshot(rtsp_url):
     Returns:
         BytesIO: The screenshot image in BytesIO format.
     """
-    # Open the RTSP stream
-    cap = cv2.VideoCapture(rtsp_url)
+    # Open the RTSP stream via the FFmpeg backend so OPENCV_FFMPEG_CAPTURE_OPTIONS
+    # (the timeout set above) applies.
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
         raise RuntimeError(f"Error: Unable to open video stream from {rtsp_url}")
 

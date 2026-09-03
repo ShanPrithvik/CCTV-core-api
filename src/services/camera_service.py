@@ -6,34 +6,40 @@ from src.services.stream_security import validate_stream_url
 import os
 
 
-def add_camera_service(camera_name, rtsp_url):
+def add_camera_service(camera_name, rtsp_url, organization_id=None):
     """Creates a new Camera record and commits it to the database."""
-    # Reject malformed / disallowed stream URLs before we ever open them (SSRF
-    # mitigation). Raises ValueError, which the controller maps to a 400.
     validate_stream_url(rtsp_url)
 
-    # Local file name and local file path
     file_name = f"{camera_name}.png"
     local_directory = os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip")
     base_url = os.getenv("API_BASE_URL", "http://localhost:5000")
     camera_view_url = f"{base_url}/camera-view/{camera_name}.png"
 
-    # Create database record
-    new_camera = Camera(camera_name=camera_name, rtsp_url=rtsp_url, view=camera_view_url)
-    db.session.add(new_camera)
-    db.session.commit()
-
-    # Capture and save screenshot locally
     camera_view_byte = capture_rtsp_screenshot(rtsp_url)
     save_to_local_storage(camera_view_byte, file_name, save_directory=local_directory)
 
+    new_camera = Camera(
+        camera_name=camera_name,
+        rtsp_url=rtsp_url,
+        view=camera_view_url,
+        organization_id=organization_id,
+    )
+    db.session.add(new_camera)
+    db.session.commit()
+
     return new_camera
 
-def get_cameras_service():
-    return Camera.query.filter_by(status='Active').all() 
+def get_cameras_service(organization_id=None):
+    query = Camera.query.filter_by(status='Active')
+    if organization_id is not None:
+        query = query.filter_by(organization_id=organization_id)
+    return query.all() 
 
-def get_camera_service(camera_id):
-    return Camera.query.get(camera_id)
+def get_camera_service(camera_id, organization_id=None):
+    query = Camera.query.filter_by(id=camera_id)
+    if organization_id is not None:
+        query = query.filter_by(organization_id=organization_id)
+    return query.first()
 
 
 def remove_camera_service(camera_id):

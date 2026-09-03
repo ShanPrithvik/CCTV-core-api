@@ -56,7 +56,7 @@ def create_app():
         return response
 
     with app.app_context():
-        from src.models import Camera, RuleConfig, RuleTypes  # noqa: F401
+        from src.models import Camera, RuleConfig, RuleTypes, User, Organization, Membership  # noqa: F401
         # First-boot convenience for the SQLite demo. Disable when generating
         # or applying Alembic migrations (AUTO_CREATE_TABLES=false) so
         # `flask db migrate` can see the real schema delta.

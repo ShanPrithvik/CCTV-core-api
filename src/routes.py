@@ -1,7 +1,9 @@
 from flask import Blueprint, jsonify
 from sqlalchemy import text
-from src.controllers.camera_controller import add_camera, get_cameras, remove_camera
-from src.controllers.rule_controller import save_rule
+from src.controllers.camera_controller import camera_bp
+from src.controllers.rule_controller import rule_bp
+from src.controllers.auth_controller import auth_bp
+from src.controllers.membership_controller import membership_bp
 from src.init import db
 
 main_bp = Blueprint("main", __name__)
@@ -27,9 +29,8 @@ def readyz():
         return jsonify({"status": "not_ready", "error": str(e)}), 503
 
 def init_routes(app):
-    from src.controllers.camera_controller import camera_bp
-    from src.controllers.rule_controller import rule_bp
-
     app.register_blueprint(main_bp)
     app.register_blueprint(camera_bp)
     app.register_blueprint(rule_bp)
+    app.register_blueprint(auth_bp)
+    app.register_blueprint(membership_bp)

@@ -56,17 +56,17 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
         # Setup display window (no-op when running headless on a server)
         setup_window("Overcrowding Monitoring")
 
-        # Create a mask for the ROI
-        mask = np.zeros((720, 1280), dtype=np.uint8)
-        pts = np.array([[ (point["x"], point["y"]) for point in roi ]], dtype=np.int32)
-        cv2.fillPoly(mask, [pts], 255)
-
         # Determine stream properties and prepare pre/post-roll buffers
         FRAME_RATE = int(cap.get(cv2.CAP_PROP_FPS) or 0)
         if FRAME_RATE <= 0 or FRAME_RATE > 120:
             FRAME_RATE = 25  # sensible default when FPS is unknown
         FRAME_WIDTH = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1280)
         FRAME_HEIGHT = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 720)
+
+        # Create a mask for the ROI using actual capture dimensions
+        mask = np.zeros((FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
+        pts = np.array([[ (point["x"], point["y"]) for point in roi ]], dtype=np.int32)
+        cv2.fillPoly(mask, [pts], 255)
 
         BUFFER_SIZE = FRAME_RATE * 2  # 2 seconds pre-roll
         AFTER_BUFFER_SIZE = FRAME_RATE * 2  # 2 seconds post-roll

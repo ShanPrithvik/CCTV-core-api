@@ -1,102 +1,138 @@
 import os
 import time
-import hmac
+import logging
 
-from flask import request, jsonify, Blueprint, send_from_directory, Response, g
+from flask import jsonify, Blueprint, send_from_directory, Response, g
 from werkzeug.exceptions import NotFound
+from werkzeug.utils import secure_filename
 from src.services.camera_service import add_camera_service, get_cameras_service, remove_camera_service, get_camera_service
 from src.models.camera import camera_schema, cameras_schema
 from src.services.stream_utils import get_latest_frame
-from src.services.org_permissions import is_org_admin
-from src.auth import jwt_required, optional_jwt, _configured_api_key, _extract_presented_key
-import jwt
+from src.services.org_permissions import is_org_admin, require_active_org
+from src.auth import jwt_required, optional_jwt, require_stream_or_snapshot_auth
+from src.utils.request_helpers import json_body
 
-camera_bp = Blueprint('camera_bp', __name__)
+camera_bp = Blueprint("camera_bp", __name__)
+logger = logging.getLogger("cctv.camera")
 
 IMAGE_DIR = os.path.abspath(os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip"))
 STREAM_POLL_INTERVAL = 0.2
 STREAM_IDLE_TIMEOUT = 15
 
 
-@camera_bp.route('/api/camera', methods=['POST'])
+@camera_bp.route("/api/camera", methods=["POST"])
 @jwt_required
 def add_camera():
-    data = request.get_json() or {}
-    camera_name = data.get('cameraName')
-    rtsp_url = data.get('rtsp')
-    
+    denied = require_active_org()
+    if denied:
+        return denied
+    if not is_org_admin(g.current_org_id):
+        return jsonify({"error": "Forbidden"}), 403
+
+    data = json_body()
+    camera_name = data.get("cameraName")
+    rtsp_url = data.get("rtsp")
+
     if not camera_name or not rtsp_url:
         return jsonify({"error": "cameraName and rtsp are required"}), 400
 
     try:
-        if not is_org_admin(g.current_org_id):
-            return jsonify({"error": "Forbidden"}), 403
-
         new_camera = add_camera_service(
             camera_name, rtsp_url, organization_id=g.current_org_id
         )
-
         return jsonify({
             "message": "Camera added successfully",
-            "camera": camera_schema.dump(new_camera)
+            "camera": camera_schema.dump(new_camera),
         }), 201
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        logger.exception("Failed to add camera")
+        return jsonify({"error": "Failed to add camera"}), 500
 
 
-@camera_bp.route('/api/camera', methods=['GET'])
+@camera_bp.route("/api/camera", methods=["GET"])
 @jwt_required
 def get_cameras():
+    denied = require_active_org()
+    if denied:
+        return denied
     try:
         cameras = get_cameras_service(organization_id=g.current_org_id)
         return jsonify(cameras_schema.dump(cameras)), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-     
-@camera_bp.route('/api/camera/<int:camera_id>', methods=['GET'])
+    except Exception:
+        logger.exception("Failed to list cameras")
+        return jsonify({"error": "Failed to list cameras"}), 500
+
+
+@camera_bp.route("/api/camera/<int:camera_id>", methods=["GET"])
 @jwt_required
 def get_camera(camera_id):
+    denied = require_active_org()
+    if denied:
+        return denied
     try:
-        camera = get_camera_service(camera_id, organization_id=getattr(g, "current_org_id", None))
+        camera = get_camera_service(camera_id, organization_id=g.current_org_id)
         if not camera:
             return jsonify({"error": "Camera not found"}), 404
         return jsonify(camera_schema.dump(camera)), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+    except Exception:
+        logger.exception("Failed to fetch camera")
+        return jsonify({"error": "Failed to fetch camera"}), 500
 
 
-@camera_bp.route('/api/camera/<int:camera_id>', methods=['DELETE'])
+@camera_bp.route("/api/camera/<int:camera_id>", methods=["DELETE"])
 @jwt_required
 def remove_camera(camera_id):
-    try:
-        if not is_org_admin(g.current_org_id):
-            return jsonify({"error": "Forbidden"}), 403
+    denied = require_active_org()
+    if denied:
+        return denied
+    if not is_org_admin(g.current_org_id):
+        return jsonify({"error": "Forbidden"}), 403
 
-        camera = get_camera_service(camera_id, organization_id=getattr(g, "current_org_id", None))
+    try:
+        camera = get_camera_service(camera_id, organization_id=g.current_org_id)
         if not camera:
             return jsonify({"error": "Camera not found"}), 404
 
-        result = remove_camera_service(camera_id)
-        if result:
+        if remove_camera_service(camera_id, organization_id=g.current_org_id):
             return jsonify({"message": "Camera removed successfully"}), 200
-        else:
-            return jsonify({"error": "Camera not found"}), 404
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-     
-# Route to serve camera view snapshot images
-@camera_bp.route('/camera-view/<filename>', methods=['GET'])
+        return jsonify({"error": "Camera not found"}), 404
+    except Exception:
+        logger.exception("Failed to remove camera")
+        return jsonify({"error": "Failed to remove camera"}), 500
+
+
+@camera_bp.route("/camera-view/<filename>", methods=["GET"])
 @optional_jwt
 def serve_camera_image(filename):
+    denied = require_stream_or_snapshot_auth()
+    if denied:
+        return denied
+
+    safe_name = secure_filename(filename)
+    if not safe_name or safe_name != filename:
+        return jsonify({"error": "Image not found"}), 404
+
+    if getattr(g, "current_user", None):
+        org_id = getattr(g, "current_org_id", None)
+        if org_id is None:
+            return jsonify({"error": "Forbidden"}), 403
+        from src.models.camera import Camera
+        camera = Camera.query.filter(
+            Camera.organization_id == org_id,
+            Camera.view.like(f"%/{safe_name}"),
+        ).first()
+        if not camera:
+            return jsonify({"error": "Image not found"}), 404
+
     try:
-        return send_from_directory(IMAGE_DIR, filename)
+        return send_from_directory(IMAGE_DIR, safe_name)
     except (FileNotFoundError, NotFound):
         return jsonify({"error": "Image not found"}), 404
 
 
-@camera_bp.route('/api/camera/<int:camera_id>/stream', methods=['GET'])
+@camera_bp.route("/api/camera/<int:camera_id>/stream", methods=["GET"])
 @optional_jwt
 def stream_camera(camera_id):
     """
@@ -105,16 +141,24 @@ def stream_camera(camera_id):
     - ?token=<jwt> (for <img> tags that cannot set headers)
     - X-API-Key header / ?api_key= query param (legacy shared key)
     """
-    current_user = getattr(g, "current_user", None)
-    if not current_user:
-        expected = _configured_api_key()
-        presented = _extract_presented_key()
-        if not expected or not presented or not hmac.compare_digest(presented, expected):
-            return jsonify({"error": "Unauthorized"}), 401
+    denied = require_stream_or_snapshot_auth()
+    if denied:
+        return denied
 
-    camera = get_camera_service(camera_id, organization_id=getattr(g, "current_org_id", None))
-    if not camera:
+    org_id = getattr(g, "current_org_id", None)
+    if getattr(g, "current_user", None) and org_id is None:
         return jsonify({"error": "Forbidden"}), 403
+
+    camera = get_camera_service(camera_id, organization_id=org_id)
+    if not camera:
+        # Shared API-key path (no JWT user) may look up by id only for the
+        # legacy single-tenant demo. JWT users are strictly org-scoped above.
+        if getattr(g, "current_user", None):
+            return jsonify({"error": "Forbidden"}), 403
+        from src.models.camera import Camera
+        camera = Camera.query.filter_by(id=camera_id, status="Active").first()
+        if not camera:
+            return jsonify({"error": "Forbidden"}), 403
 
     def generate():
         last_frame = None

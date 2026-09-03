@@ -8,6 +8,7 @@ from src.celery_worker import celery
 from celery.contrib.abortable import AbortableTask
 import collections
 from src.services.local_storage import save_video_clip_async
+from src.services.stream_security import mask_credentials
 from src.services.stream_utils import (
     display_frame,
     setup_window,
@@ -36,7 +37,7 @@ DETECTION_FRAME_SKIP = max(1, int(os.getenv("DETECTION_FRAME_SKIP", "3")))
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_detect_overcrowding")
 def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
     print("===== Celery Task Started for Overcrowding Detection =====")
-    print(f"Starting detect overcrowding for {rtsp_url}")
+    print(f"Starting detect overcrowding for {mask_credentials(rtsp_url)}")
     log_file_path = "logs/overcrowding_alerts.txt"
     os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
     cap = None
@@ -46,7 +47,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
 
         cap = cv2.VideoCapture(rtsp_url)
         if not cap.isOpened():
-            raise RuntimeError(f"Error: Unable to open video stream from {rtsp_url}")
+            raise RuntimeError("Error: Unable to open video stream")
         # Try to minimize internal buffering if backend supports
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
@@ -77,15 +78,17 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
         frame_count = 0
         output_folder = os.getenv("SAVED_CLIPS_DIR", "saved_clips")
         os.makedirs(output_folder, exist_ok=True)
- 
+
         # Extract rule types values
         rule_values = {rule_type.get('type'): rule_type.get('value') for rule_type in rule_types}
-        max_people = int(rule_values.get("Number of Person"))
-        alert_threshold = int(rule_values.get("Time to Lookout"))
-        if max_people is None:
+        max_people_raw = rule_values.get("Number of Person")
+        alert_threshold_raw = rule_values.get("Time to Lookout")
+        if max_people_raw is None:
             raise ValueError("Number of Person value is required for CROWD_DETECTION")
-        if alert_threshold is None:
+        if alert_threshold_raw is None:
             raise ValueError("Time to Lookout value is required for CROWD_DETECTION")
+        max_people = int(max_people_raw)
+        alert_threshold = int(alert_threshold_raw)
 
         # Variables for tracking overcrowding
         alert_timer = None
@@ -128,13 +131,13 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                             center_x = (rx1 + rx2) // 2
                             center_y = (ry1 + ry2) // 2
 
-                            if mask[center_y, center_x] > 0:
+                            if 0 <= center_y < mask.shape[0] and 0 <= center_x < mask.shape[1] and mask[center_y, center_x] > 0:
                                 person_count += 1
 
                                 cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
                                 cv2.putText(frame, label, (rx1, ry1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                            
+
             if person_count > max_people:
                 if alert_timer is None:
                     alert_timer = time.time()
@@ -143,7 +146,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                     print(message)
                     with open(log_file_path, "a") as f:
                         f.write(message + "\n")
-                    
+
                 elif (time.time() - alert_timer >= alert_threshold) and not alert_active:
                     alert_active = True
                     message = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - ALERT: Overcrowding detected in Camera {camera_id} for {alert_threshold} seconds!"
@@ -183,7 +186,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                     )
                     print(f"Saving asynchronously: {filename}")
                     frames_to_save.clear()
- 
+
         # Blinking alert overlay (outside the logic above)
             if alert_active:
                 current_time = time.time()
@@ -196,7 +199,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                     x = max((frame.shape[1] - text_w) // 2, 0)
                     cv2.putText(frame, alert_text, (x, 110), font, font_scale, (255, 0, 0), thickness)
                     alert_beep(1000, 1000)
- 
+
 
             # Show window (desktop) or publish frame for live streaming (headless)
             if display_frame("Overcrowding Monitoring", frame, camera_id=camera_id):
@@ -205,7 +208,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
 
     except Exception as e:
         print(f"Error in overcrowding detection: {e}")
-        
+
     finally:
         if cap is not None:  # Only release cap if it was initialized
             cap.release()

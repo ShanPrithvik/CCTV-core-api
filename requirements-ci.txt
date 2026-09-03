@@ -1,0 +1,18 @@
+# API + test dependencies only. Production workers still need the full
+# requirements.txt (OpenCV, Ultralytics, PyTorch).
+flask
+flask-cors
+flask-sqlalchemy
+flask-migrate
+flask-marshmallow
+marshmallow-sqlalchemy
+python-dotenv
+gunicorn
+PyJWT
+pytest
+celery
+redis
+Pillow
+opencv-python-headless
+ruff
+pip-audit

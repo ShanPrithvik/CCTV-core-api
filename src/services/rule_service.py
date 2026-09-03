@@ -3,30 +3,61 @@ from sqlalchemy.orm import joinedload
 from src.models.camera import Camera
 from src.models.ruleConfig import db, RuleConfig
 from src.models.ruleTypes import RuleTypes
-from src.services.overcrowding_service import overcrowd_area_async
-from src.services.shoplifting_service import detect_shoplifting_async
-from src.services.restricted_area_service import restricted_area_async
 from src.enum.model_types import ModelType
-import traceback
-import json
+from src.utils.validation import parse_positive_int
+import logging
+import math
+
+logger = logging.getLogger("cctv.rule")
+
+
+def _detection_task(model_type_value):
+    """Import Celery tasks lazily so API tests/CI do not load YOLO/torch."""
+    if model_type_value == ModelType.CROWD_DETECTION.value:
+        from src.services.overcrowding_service import overcrowd_area_async
+        return overcrowd_area_async
+    if model_type_value == ModelType.SHOPLIFTING.value:
+        from src.services.shoplifting_service import detect_shoplifting_async
+        return detect_shoplifting_async
+    if model_type_value == ModelType.RESTRICTED_AREA.value:
+        from src.services.restricted_area_service import restricted_area_async
+        return restricted_area_async
+    return None
+
+logger = logging.getLogger("cctv.rule")
+
+
+def _validated_roi(roi):
+    if not roi or len(roi) != 4:
+        raise ValueError("ROI must have exactly 4 points")
+    points = []
+    for point in roi:
+        if not isinstance(point, dict) or "x" not in point or "y" not in point:
+            raise ValueError("ROI must be an array of objects with 'x' and 'y' properties")
+        try:
+            x = float(point["x"])
+            y = float(point["y"])
+        except (TypeError, ValueError):
+            raise ValueError("ROI coordinates must be numbers")
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise ValueError("ROI coordinates must be finite numbers")
+        if not (0 <= x <= 10000 and 0 <= y <= 10000):
+            raise ValueError("ROI coordinates are out of range")
+        points.append({"x": x, "y": y})
+    return points
+
 
 
 def _abort_task(rule_config):
     if not rule_config.task_id:
         return
     try:
-        if rule_config.model_type == ModelType.CROWD_DETECTION.value:
-            result = overcrowd_area_async.AsyncResult(rule_config.task_id)
-        elif rule_config.model_type == ModelType.SHOPLIFTING.value:
-            result = detect_shoplifting_async.AsyncResult(rule_config.task_id)
-        elif rule_config.model_type == ModelType.RESTRICTED_AREA.value:
-            result = restricted_area_async.AsyncResult(rule_config.task_id)
-        else:
+        task = _detection_task(rule_config.model_type)
+        if task is None:
             return
-        result.abort()
-    except Exception as e:
-        print(f"Error aborting Celery task: {str(e)}")
-        traceback.print_exc()
+        task.AsyncResult(rule_config.task_id).abort()
+    except Exception:
+        logger.exception("Error aborting Celery task")
 
 
 def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id=None):
@@ -52,6 +83,8 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
     camera = Camera.query.filter_by(id=camera_id).first()
     if not camera:
         raise ValueError("Camera not found")
+    if organization_id is not None and camera.organization_id != organization_id:
+        raise ValueError("Camera not found")
 
     # --- Validate everything before touching the database ---
     dispatch_roi = None
@@ -64,12 +97,7 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
             roi = rule.get('roi')
             rule_types = rule.get('ruleTypes', [])
 
-            if not roi or len(roi) != 4:
-                raise ValueError("ROI must have exactly 4 points")
-            if not all(isinstance(point, dict) and 'x' in point and 'y' in point for point in roi):
-                raise ValueError("ROI must be an array of objects with 'x' and 'y' properties")
-
-            dispatch_roi = roi
+            dispatch_roi = _validated_roi(roi)
 
             for rule_type in rule_types:
                 type_name = rule_type.get('type')
@@ -77,6 +105,18 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
                 if type_name is None or value is None:
                     raise ValueError("Rule type and value are required")
                 dispatch_rule_types.append({"type": type_name, "value": value})
+
+        type_names = {rt["type"] for rt in dispatch_rule_types}
+        if "Number of Person" not in type_names or "Time to Lookout" not in type_names:
+            raise ValueError("CROWD_DETECTION requires 'Number of Person' and 'Time to Lookout'")
+        parse_positive_int(
+            next(rt["value"] for rt in dispatch_rule_types if rt["type"] == "Number of Person"),
+            "Number of Person",
+        )
+        parse_positive_int(
+            next(rt["value"] for rt in dispatch_rule_types if rt["type"] == "Time to Lookout"),
+            "Time to Lookout",
+        )
 
     elif model_type_enum == ModelType.SHOPLIFTING:
         for rule in rules:
@@ -94,14 +134,10 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
             roi = rule.get('roi')
             rule_types = rule.get('ruleTypes', [])
 
-            if not roi or len(roi) != 4:
-                raise ValueError("ROI must have exactly 4 points")
-            if not all(isinstance(point, dict) and 'x' in point and 'y' in point for point in roi):
-                raise ValueError("ROI must be an array of objects with 'x' and 'y' properties")
             if rule_types:
                 raise ValueError("RuleTypes must be empty for RESTRICTED AREA model type")
 
-            dispatch_roi = roi
+            dispatch_roi = _validated_roi(roi)
 
     # --- Apply changes ---
     if existing_rule_id:
@@ -139,25 +175,24 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
 
     # --- Dispatch the detection task ---
     try:
-        if model_type_enum == ModelType.CROWD_DETECTION:
-            task = overcrowd_area_async.delay(camera.rtsp_url, camera_id, dispatch_roi, dispatch_rule_types)
-        elif model_type_enum == ModelType.SHOPLIFTING:
-            task = detect_shoplifting_async.delay(camera.rtsp_url, camera_id)
-        elif model_type_enum == ModelType.RESTRICTED_AREA:
-            task = restricted_area_async.delay(camera.rtsp_url, camera_id, dispatch_roi)
-        else:
+        task_fn = _detection_task(model_type_enum.value)
+        if task_fn is None:
             task = None
+        elif model_type_enum == ModelType.CROWD_DETECTION:
+            task = task_fn.delay(camera.rtsp_url, camera_id, dispatch_roi, dispatch_rule_types)
+        elif model_type_enum == ModelType.SHOPLIFTING:
+            task = task_fn.delay(camera.rtsp_url, camera_id)
+        else:
+            task = task_fn.delay(camera.rtsp_url, camera_id, dispatch_roi)
 
         if task is not None:
             rule_config.task_id = task.id
             db.session.commit()
-    except RuntimeError as e:
-        print(f"Error triggering detection task: {str(e)}")
-        traceback.print_exc()
-        raise ValueError(f"Failed to start detection: {str(e)}")
-    except Exception as e:
-        print(f"Error triggering detection task: {str(e)}")
-        traceback.print_exc()
+    except RuntimeError:
+        logger.exception("Error triggering detection task")
+        raise ValueError("Failed to start detection")
+    except Exception:
+        logger.exception("Error triggering detection task")
 
     response = {
         "cameraId": rule_config.camera_id,
@@ -174,11 +209,14 @@ def get_rule_for_camera(camera_id: str, organization_id=None):
     camera = Camera.query.filter_by(id=camera_id).first()
     if not camera:
         raise ValueError("Camera not found")
-     
-    query = RuleConfig.query.options(joinedload(RuleConfig.rule_types)).filter_by(camera_id=camera_id, status='Active')
-    if organization_id is not None:
-        query = query.filter_by(organization_id=organization_id)
-    rules = query.all()
+    if organization_id is None or camera.organization_id != organization_id:
+        raise ValueError("Camera not found")
+
+    rules = (
+        RuleConfig.query.options(joinedload(RuleConfig.rule_types))
+        .filter_by(camera_id=camera_id, status="Active", organization_id=organization_id)
+        .all()
+    )
 
     if not rules:
         return ({"camera_id": camera_id, "rules": []})
@@ -214,26 +252,26 @@ def remove_camera_rule(camera_id, rule_id):
     try:
         camera = Camera.query.filter_by(id=camera_id).first()
         if not camera:
-            return ({"error": "Camera not found"})
+            return {"error": "Camera not found"}, 404
 
         rule = RuleConfig.query.filter_by(id=rule_id, camera_id=camera_id).first()
         if not rule:
-            return ({"error": "Rule not found for the specified camera"})
+            return {"error": "Rule not found for the specified camera"}, 404
 
         _abort_task(rule)
 
-        rule.status = 'Inactive'
+        rule.status = "Inactive"
         db.session.commit()
 
-        return ({
+        return {
             "message": "Rule deleted successfully",
             "name": rule.name,
             "cameraId": camera_id,
             "ruleId": rule_id,
-            "status": "Inactive"
-        })
+            "status": "Inactive",
+        }, 200
 
-    except Exception as e:
-        print(f"Error deleting rule: {str(e)}")
+    except Exception:
+        logger.exception("Error deleting rule")
         db.session.rollback()
-        return ({"error": "An error occurred while deleting the rule"})
+        return {"error": "An error occurred while deleting the rule"}, 500

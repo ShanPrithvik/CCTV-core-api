@@ -22,4 +22,4 @@ ENV HEADLESS=true \
 EXPOSE 5000
 
 # Overridden by docker-compose.yml for the Celery worker service.
-CMD ["gunicorn", "-w", "2", "-b", "0.0.0.0:5000", "app:app"]
+CMD ["gunicorn", "-w", "2", "-k", "gthread", "--threads", "8", "-b", "0.0.0.0:5000", "--timeout", "0", "app:app"]

@@ -9,7 +9,7 @@ class Membership(db.Model):
     organization_id = db.Column(db.Integer, db.ForeignKey('Organization.id'), nullable=False)
     role = db.Column(db.Enum('Owner', 'Admin', 'Member'), default='Member')
     status = db.Column(db.Enum('Active', 'Inactive', 'Pending'), default='Active')
-    invite_token = db.Column(db.String(255), nullable=True)
+    invite_token = db.Column(db.String(255), nullable=True, unique=True, index=True)
 
     __table_args__ = (
         db.UniqueConstraint('user_id', 'organization_id', name='uq_user_org'),

@@ -1,4 +1,4 @@
-FROM python:3.11-slim
+FROM python:3.14-slim
 
 # ffmpeg: low-latency alert-clip encoding (src/services/local_storage.py)
 # libgl1 / libglib2.0-0: runtime libs some OpenCV/Ultralytics codepaths touch

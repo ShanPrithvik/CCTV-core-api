@@ -8,7 +8,7 @@ Backend service for an AI-powered CCTV surveillance system. It manages cameras a
 - **Rule configuration** — attach detection rules to a camera, each backed by a model type and (optionally) a region of interest (ROI).
 - **Detection models** (run as abortable Celery tasks):
   - `CROWD_DETECTION` — overcrowding detection inside an ROI, with a configurable person count and alert timeout.
-  - `RESTRICTED_AREA` — alerts when any person/object enters a defined ROI.
+  - `RESTRICTED_AREA` — creates a high-priority event when a person enters a defined ROI.
   - `SHOPLIFTING` — shoplifting detection using a custom-trained model.
 - **Live view** — while a rule is running, the worker publishes the latest annotated frame (ROI, boxes, alert overlays) to Redis; `GET /api/camera/<id>/stream` serves it as an MJPEG stream a browser `<img>` tag can render directly.
 - **Automatic clip saving** — when an alert triggers, a short pre-/post-roll video clip is saved (FFmpeg with an OpenCV fallback).
@@ -162,7 +162,22 @@ Base URL: `http://localhost:5000` (or your deployed API URL)
 | `GET` | `/api/camera/<camera_id>/rule` | Get active rules for a camera |
 | `DELETE` | `/api/camera/<camera_id>/rule/<rule_id>` | Soft-delete a rule and abort its task |
 
-> Note: there is no `PUT` (update) route for rules yet, even though the frontend has an `updateRule()` call for editing an existing rule. Only create and delete are implemented server-side.
+Rule updates are available at
+`PUT /api/camera/<camera_id>/rule/<rule_id>`.
+
+### Security operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/operations/overview` | Alert-first summary with latest alerts and camera analytics-frame health |
+| `GET` | `/api/events` | List structured events for the active organization |
+| `GET` | `/api/alerts` | List alerts; optionally filter by `status` |
+| `PATCH` | `/api/alerts/<alert_id>` | Set status to `NEW`, `ACKNOWLEDGED`, or `RESOLVED` |
+| `GET` | `/api/camera-health` | List current analytics-frame health signals |
+
+Camera health is intentionally reported as an **analytics-frame signal** in
+this phase. `UNKNOWN` means no recent frame was published by a running
+detection rule; it does not yet prove that the physical camera is offline.
 
 **Example — create a crowd-detection rule:**
 

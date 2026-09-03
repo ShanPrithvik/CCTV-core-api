@@ -78,7 +78,17 @@ def create_app():
         return jsonify({"error": "Internal server error"}), 500
 
     with app.app_context():
-        from src.models import Camera, RuleConfig, RuleTypes, User, Organization, Membership  # noqa: F401
+        from src.models import (  # noqa: F401
+            Alert,
+            Camera,
+            CameraHealth,
+            Event,
+            Membership,
+            Organization,
+            RuleConfig,
+            RuleTypes,
+            User,
+        )
         # First-boot convenience for the SQLite demo. Disable when generating
         # or applying Alembic migrations (AUTO_CREATE_TABLES=false) so
         # `flask db migrate` can see the real schema delta.

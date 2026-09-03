@@ -6,6 +6,8 @@ from .ruleTypes import RuleTypes
 from .user import User, user_schema, users_schema
 from .organization import Organization, organization_schema, organizations_schema
 from .membership import Membership, membership_schema, memberships_schema
+from .event import Event, Alert
+from .camera_health import CameraHealth
 
 __all__ = [
     "Camera",
@@ -22,6 +24,9 @@ __all__ = [
     "Membership",
     "membership_schema",
     "memberships_schema",
+    "Event",
+    "Alert",
+    "CameraHealth",
 ]
 
 # Relationships that cross model files, added after all classes exist to

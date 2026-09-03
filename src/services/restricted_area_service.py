@@ -8,6 +8,7 @@ from src.celery_worker import celery
 from celery.contrib.abortable import AbortableTask
 import collections
 from src.services.local_storage import save_video_clip_async
+from src.services.event_service import record_detection_event
 from src.services.stream_utils import display_frame, setup_window, teardown_windows
 from src.services.stream_security import mask_credentials
 
@@ -27,6 +28,9 @@ def get_model():
 
 
 DETECTION_FRAME_SKIP = max(1, int(os.getenv("DETECTION_FRAME_SKIP", "3")))
+RESTRICTED_ALERT_COOLDOWN_SECONDS = max(
+    1, int(os.getenv("RESTRICTED_ALERT_COOLDOWN_SECONDS", "60"))
+)
 
 
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_restricted_area")
@@ -70,6 +74,8 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
         recording = False
         frames_to_save = []
         save_start_frame_count = 0
+        pending_clip_path = None
+        last_alert_at = 0.0
         frame_count = 0
         output_folder = os.getenv("SAVED_CLIPS_DIR", "saved_clips")
         os.makedirs(output_folder, exist_ok=True)
@@ -103,25 +109,49 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
                     for box in result.boxes:
                         rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
                         label = model.names[int(box.cls[0])]
+                        confidence = float(box.conf[0])
 
-                        # Check if the object is inside the ROI
+                        # The initial product rule is intentionally person-only.
+                        # Alerting on every YOLO class creates unusable noise.
+                        if label != "person":
+                            continue
+
                         center_x = (rx1 + rx2) // 2
                         center_y = (ry1 + ry2) // 2
 
                         if 0 <= center_y < mask.shape[0] and 0 <= center_x < mask.shape[1] and mask[center_y, center_x] > 0:
-                            # Draw bounding box and log alert
                             cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
-                            cv2.putText(frame, f"ALERT: {label} in restricted area", (rx1, ry1 - 10),
+                            cv2.putText(frame, "ALERT: person in restricted area", (rx1, ry1 - 10),
                                         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                            message = f"{time.strftime('%Y-%m-%d %H:%M:%S')} - ALERT: {label} detected in restricted area for Camera {camera_id}"
-                            print(message)
-                            with open(log_file_path, "a") as f:
-                                f.write(message + "\n")
-                            # Start recording with pre-roll if not already recording
-                            if not recording:
+
+                            now = time.time()
+                            cooldown_elapsed = (
+                                now - last_alert_at >= RESTRICTED_ALERT_COOLDOWN_SECONDS
+                            )
+                            if not recording and cooldown_elapsed:
+                                last_alert_at = now
                                 recording = True
                                 frames_to_save = list(video_queue)
                                 save_start_frame_count = frame_count
+                                pending_clip_path = os.path.join(
+                                    output_folder,
+                                    f"restricted_area_{camera_id}_{int(now)}.mp4",
+                                )
+                                message = (
+                                    f"{time.strftime('%Y-%m-%d %H:%M:%S')} - "
+                                    f"ALERT: person detected in restricted area for Camera {camera_id}"
+                                )
+                                print(message)
+                                with open(log_file_path, "a") as f:
+                                    f.write(message + "\n")
+                                record_detection_event(
+                                    camera_id=camera_id,
+                                    event_type="person_entered_restricted_zone",
+                                    severity="HIGH",
+                                    confidence=confidence,
+                                    clip_path=pending_clip_path,
+                                    metadata={"source": "restricted_area", "label": "person"},
+                                )
 
 
             # Handle recording post-roll and asynchronous save
@@ -129,7 +159,9 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
                 frames_to_save.append(frame)
                 if frame_count - save_start_frame_count >= AFTER_BUFFER_SIZE:
                     recording = False
-                    filename = os.path.join(output_folder, f"restricted_area_{camera_id}_{int(time.time())}.mp4")
+                    filename = pending_clip_path or os.path.join(
+                        output_folder, f"restricted_area_{camera_id}_{int(time.time())}.mp4"
+                    )
                     save_video_clip_async(
                         frames=frames_to_save,
                         fps=FRAME_RATE,
@@ -142,6 +174,7 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
                     )
                     print(f"Saving asynchronously: {filename}")
                     frames_to_save.clear()
+                    pending_clip_path = None
 
             # Show window (desktop) or publish frame for live streaming (headless)
             if display_frame("Restricted Area Monitoring", frame, camera_id=camera_id):

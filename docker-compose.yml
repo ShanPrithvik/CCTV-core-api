@@ -70,12 +70,14 @@ services:
     env_file:
       - .env
     environment:
+      - SQLITE_PATH=/app/data/cctv.db
       - REDIS_URL=redis://redis:6379/0
       - REDIS_PASSWORD=${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}
     command: ["celery", "-A", "src.celery_worker.celery", "worker", "--loglevel=info", "--concurrency=2"]
     depends_on:
       - redis
     volumes:
+      - cctv-db:/app/data
       - cctv-snip:/app/cctv_snip
       - cctv-clips:/app/saved_clips
       - cctv-logs:/app/logs

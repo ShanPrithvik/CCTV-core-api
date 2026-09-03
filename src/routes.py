@@ -4,6 +4,7 @@ from src.controllers.camera_controller import camera_bp
 from src.controllers.rule_controller import rule_bp
 from src.controllers.auth_controller import auth_bp
 from src.controllers.membership_controller import membership_bp
+from src.controllers.operations_controller import operations_bp
 from src.init import db, logger
 
 main_bp = Blueprint("main", __name__)
@@ -37,3 +38,4 @@ def init_routes(app):
     app.register_blueprint(rule_bp)
     app.register_blueprint(auth_bp)
     app.register_blueprint(membership_bp)
+    app.register_blueprint(operations_bp)

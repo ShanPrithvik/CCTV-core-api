@@ -11,6 +11,8 @@ from typing import Optional
 
 import cv2
 
+from src.config.redis_config import get_redis_url
+
 _redis_client = None
 
 FRAME_KEY_PREFIX = "camera_frame:"
@@ -27,8 +29,12 @@ def get_redis_client():
     if _redis_client is None:
         import redis
 
-        redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
-        _redis_client = redis.Redis.from_url(redis_url)
+        redis_url = get_redis_url()
+        _redis_client = redis.Redis.from_url(
+            redis_url,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+        )
     return _redis_client
 
 

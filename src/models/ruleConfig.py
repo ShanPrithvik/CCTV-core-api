@@ -3,15 +3,15 @@ from src.init import db
 class RuleConfig(db.Model):
     __tablename__ = 'RuleConfig'
 
-    id = db.Column(db.Integer, primary_key=True)  
+    id = db.Column(db.Integer, primary_key=True)
     camera_id = db.Column(db.Integer, db.ForeignKey('Camera.id'), nullable=False)
-    model_type = db.Column(db.String(50), nullable=False) 
+    model_type = db.Column(db.String(50), nullable=False)
     roi_coordinates = db.Column(db.JSON, nullable=False)
-    name = db.Column(db.String(255), nullable=False)  
+    name = db.Column(db.String(255), nullable=False)
     status = db.Column(db.Enum('Active', 'Inactive'), default='Active', nullable=False)
     task_id = db.Column(db.String(255), nullable=True)
-    organization_id = db.Column(db.Integer, nullable=True)
-    
+    organization_id = db.Column(db.Integer, nullable=True, index=True)
+
     rule_types = db.relationship('RuleTypes', backref='ruleconfig', lazy=True)
 
     def __init__(self, camera_id, model_type, roi_coordinates, name, organization_id=None):

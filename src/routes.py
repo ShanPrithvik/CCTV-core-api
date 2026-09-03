@@ -4,9 +4,10 @@ from src.controllers.camera_controller import camera_bp
 from src.controllers.rule_controller import rule_bp
 from src.controllers.auth_controller import auth_bp
 from src.controllers.membership_controller import membership_bp
-from src.init import db
+from src.init import db, logger
 
 main_bp = Blueprint("main", __name__)
+
 
 @main_bp.route("/")
 def home():
@@ -25,8 +26,10 @@ def readyz():
     try:
         db.session.execute(text("SELECT 1"))
         return jsonify({"status": "ready"}), 200
-    except Exception as e:
-        return jsonify({"status": "not_ready", "error": str(e)}), 503
+    except Exception:
+        logger.exception("Readiness check failed")
+        return jsonify({"status": "not_ready"}), 503
+
 
 def init_routes(app):
     app.register_blueprint(main_bp)

@@ -1,21 +1,29 @@
 import os
+import uuid
+import logging
 
-from flask import Flask
+from flask import Flask, g, jsonify, request
 from flask_cors import CORS
 from flask_migrate import Migrate
 from flask_sqlalchemy import SQLAlchemy
 from flask_marshmallow import Marshmallow
+from werkzeug.exceptions import HTTPException
 
 from src.auth import register_api_key_auth
+from src.config.db_config import build_database_uri, sqlalchemy_engine_options
 
 db = SQLAlchemy()
 ma = Marshmallow()
 migrate = Migrate()
+logger = logging.getLogger("cctv")
+
 
 def create_app():
     app = Flask(__name__)
 
     app.config.from_object("src.config.db_config.DBConfig")
+    app.config["SQLALCHEMY_DATABASE_URI"] = build_database_uri()
+    app.config["SQLALCHEMY_ENGINE_OPTIONS"] = sqlalchemy_engine_options()
 
     # Cap request body size to reject oversized/abusive payloads. Rule/camera
     # JSON is tiny; 1 MiB is generous. Override via MAX_CONTENT_LENGTH_BYTES.
@@ -43,6 +51,10 @@ def create_app():
 
     register_api_key_auth(app)
 
+    @app.before_request
+    def assign_request_id():
+        g.request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+
     @app.after_request
     def set_security_headers(response):
         # Baseline hardening headers. Cheap, safe defaults that do not affect
@@ -53,7 +65,17 @@ def create_app():
         response.headers.setdefault(
             "Permissions-Policy", "geolocation=(), microphone=(), camera=()"
         )
+        request_id = getattr(g, "request_id", None)
+        if request_id:
+            response.headers.setdefault("X-Request-ID", request_id)
         return response
+
+    @app.errorhandler(Exception)
+    def handle_unexpected_error(exc):
+        if isinstance(exc, HTTPException):
+            return jsonify({"error": exc.description or exc.name}), exc.code
+        logger.exception("Unhandled error rid=%s", getattr(g, "request_id", "-"))
+        return jsonify({"error": "Internal server error"}), 500
 
     with app.app_context():
         from src.models import Camera, RuleConfig, RuleTypes, User, Organization, Membership  # noqa: F401

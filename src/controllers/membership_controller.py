@@ -9,30 +9,38 @@ from src.models.membership import Membership
 from src.models.user import User
 from src.auth import jwt_required, create_access_token
 from src.services.email_service import send_invite_email
+from src.services.org_permissions import is_org_admin, is_org_owner
 from src.utils.request_helpers import json_body
+from src.utils.validation import is_valid_email
 
 membership_bp = Blueprint("membership_bp", __name__)
+ALLOWED_ROLES = ("Owner", "Admin", "Member")
 
 
 def _current_user():
     return g.current_user
 
 
-def _is_org_admin(user_id: int, organization_id: int) -> bool:
-    m = Membership.query.filter_by(
-        user_id=user_id, organization_id=organization_id, status='Active'
-    ).first()
-    return bool(m and m.role in ('Owner', 'Admin'))
+def _parse_org_id(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _last_owner_guard(organization_id: int, exclude_membership_id: int | None = None) -> bool:
     """Return True if removing/demoting the given membership would leave the org with zero Owners."""
     query = Membership.query.filter_by(
-        organization_id=organization_id, role='Owner', status='Active'
+        organization_id=organization_id, role="Owner", status="Active"
     )
     if exclude_membership_id is not None:
         query = query.filter(Membership.id != exclude_membership_id)
     return query.count() == 0
+
+
+def _invite_link(token: str) -> str:
+    public_app_url = (os.getenv("PUBLIC_APP_URL") or os.getenv("API_BASE_URL") or "http://localhost:5000").rstrip("/")
+    return f"{public_app_url}/accept-invite?token={token}"
 
 
 @membership_bp.route("/api/org", methods=["POST"])
@@ -42,18 +50,20 @@ def create_organization():
     name = (data.get("name") or "").strip()
     if not name:
         return jsonify({"error": "name is required"}), 400
+    if len(name) > 255:
+        return jsonify({"error": "name is too long"}), 400
 
     user = _current_user()
 
-    org = Organization(name=name, status='Active')
+    org = Organization(name=name, status="Active")
     db.session.add(org)
     db.session.flush()
 
     membership = Membership(
         user_id=user.id,
         organization_id=org.id,
-        role='Owner',
-        status='Active',
+        role="Owner",
+        status="Active",
     )
     db.session.add(membership)
 
@@ -79,36 +89,38 @@ def invite_member():
     data = json_body()
     email = (data.get("email") or "").strip().lower()
     role = (data.get("role") or "Member").strip()
-    organization_id = data.get("organization_id")
+    organization_id = _parse_org_id(data.get("organization_id"))
 
     if not email or not organization_id:
         return jsonify({"error": "email and organization_id are required"}), 400
+    if not is_valid_email(email):
+        return jsonify({"error": "Invalid email address"}), 400
 
-    if role not in ('Owner', 'Admin', 'Member'):
+    if role not in ALLOWED_ROLES:
         return jsonify({"error": "role must be Owner, Admin, or Member"}), 400
 
-    if not _is_org_admin(user.id, organization_id):
+    if not is_org_admin(organization_id):
         return jsonify({"error": "Forbidden"}), 403
+
+    if role == "Owner" and not is_org_owner(organization_id):
+        return jsonify({"error": "Only an Owner can invite another Owner"}), 403
 
     target_user = User.query.filter_by(email=email).first()
     if not target_user:
-        target_user = User(email=email, name=email.split('@')[0], status='Pending')
-        target_user.password_hash = ''
+        target_user = User(email=email, name=email.split("@")[0], status="Pending")
+        target_user.password_hash = ""
         db.session.add(target_user)
         db.session.flush()
 
     existing = Membership.query.filter_by(
         user_id=target_user.id, organization_id=organization_id
     ).first()
-    if existing and existing.status == 'Active':
+    if existing and existing.status == "Active":
         return jsonify({"error": "User is already a member"}), 409
 
     invite_token = secrets.token_urlsafe(32)
     if existing:
-        # Re-invite path: reactivate the existing membership instead of
-        # inserting a duplicate row (which violated the uq_user_org unique
-        # constraint and crashed with a 500 after a member was removed).
-        existing.status = 'Pending'
+        existing.status = "Pending"
         existing.role = role
         existing.invite_token = invite_token
         membership = existing
@@ -117,7 +129,7 @@ def invite_member():
             user_id=target_user.id,
             organization_id=organization_id,
             role=role,
-            status='Pending',
+            status="Pending",
             invite_token=invite_token,
         )
         db.session.add(membership)
@@ -127,7 +139,7 @@ def invite_member():
         db.session.rollback()
         return jsonify({"error": "Failed to invite member"}), 500
 
-    org = Organization.query.get(organization_id)
+    org = db.session.get(Organization, organization_id)
     org_name = org.name if org else "the organization"
     send_invite_email(
         to_email=target_user.email,
@@ -135,9 +147,6 @@ def invite_member():
         organization_name=org_name,
         inviter_name=user.name,
     )
-
-    public_app_url = (os.getenv("PUBLIC_APP_URL", "http://localhost:5000").rstrip("/"))
-    invite_link = f"{public_app_url}/accept-invite?token={invite_token}"
 
     return jsonify({
         "id": membership.id,
@@ -148,28 +157,29 @@ def invite_member():
         "role": role,
         "status": "Pending",
         "invite_token": invite_token,
-        "invite_link": invite_link,
+        "invite_link": _invite_link(invite_token),
     }), 201
 
 
 @membership_bp.route("/api/org/members/<int:membership_id>", methods=["PATCH"])
 @jwt_required
 def update_member_role(membership_id: int):
-    current_user = _current_user()
-
-    membership = Membership.query.get(membership_id)
+    membership = db.session.get(Membership, membership_id)
     if not membership:
         return jsonify({"error": "Membership not found"}), 404
 
-    if not _is_org_admin(current_user.id, membership.organization_id):
+    if not is_org_admin(membership.organization_id):
         return jsonify({"error": "Forbidden"}), 403
 
     data = json_body()
     role = data.get("role")
-    if role not in ('Owner', 'Admin', 'Member'):
+    if role not in ALLOWED_ROLES:
         return jsonify({"error": "role must be Owner, Admin, or Member"}), 400
 
-    if membership.role == 'Owner' and role != 'Owner':
+    if role == "Owner" and not is_org_owner(membership.organization_id):
+        return jsonify({"error": "Only an Owner can assign the Owner role"}), 403
+
+    if membership.role == "Owner" and role != "Owner":
         if _last_owner_guard(membership.organization_id, exclude_membership_id=membership.id):
             return jsonify({"error": "Cannot demote the last Owner"}), 409
 
@@ -187,20 +197,18 @@ def update_member_role(membership_id: int):
 @membership_bp.route("/api/org/members/<int:membership_id>", methods=["DELETE"])
 @jwt_required
 def remove_member(membership_id: int):
-    current_user = _current_user()
-
-    membership = Membership.query.get(membership_id)
+    membership = db.session.get(Membership, membership_id)
     if not membership:
         return jsonify({"error": "Membership not found"}), 404
 
-    if not _is_org_admin(current_user.id, membership.organization_id):
+    if not is_org_admin(membership.organization_id):
         return jsonify({"error": "Forbidden"}), 403
 
-    if membership.role == 'Owner':
+    if membership.role == "Owner":
         if _last_owner_guard(membership.organization_id, exclude_membership_id=membership.id):
             return jsonify({"error": "Cannot remove the last Owner"}), 409
 
-    membership.status = 'Inactive'
+    membership.status = "Inactive"
     try:
         db.session.commit()
     except Exception:
@@ -214,26 +222,21 @@ def remove_member(membership_id: int):
 @membership_bp.route("/api/org/members", methods=["GET"])
 @jwt_required
 def list_members():
-    current_user = _current_user()
-
     org_id = request.args.get("organization_id", type=int)
     if not org_id:
         return jsonify({"error": "organization_id is required"}), 400
 
-    if not _is_org_admin(current_user.id, org_id):
+    if not is_org_admin(org_id):
         return jsonify({"error": "Forbidden"}), 403
 
     members = (
-        Membership.query.filter_by(organization_id=org_id, status='Active')
+        Membership.query.filter_by(organization_id=org_id, status="Active")
         .join(User, Membership.user_id == User.id)
         .all()
     )
 
     from src.utils.serializers import membership_summary
-    return jsonify([
-        membership_summary(m)
-        for m in members
-    ]), 200
+    return jsonify([membership_summary(m) for m in members]), 200
 
 
 @membership_bp.route("/api/org", methods=["GET"])
@@ -241,8 +244,7 @@ def list_members():
 def list_organizations():
     user = _current_user()
 
-    memberships = Membership.query.filter_by(user_id=user.id, status='Active').all()
-    from src.utils.serializers import membership_summary
+    memberships = Membership.query.filter_by(user_id=user.id, status="Active").all()
     return jsonify([
         {
             "id": m.organization_id,
@@ -260,7 +262,7 @@ def switch_organization(organization_id: int):
     user = _current_user()
 
     membership = Membership.query.filter_by(
-        user_id=user.id, organization_id=organization_id, status='Active'
+        user_id=user.id, organization_id=organization_id, status="Active"
     ).first()
     if not membership:
         return jsonify({"error": "Not a member of this organization"}), 403
@@ -280,17 +282,15 @@ def switch_organization(organization_id: int):
 @membership_bp.route("/api/org/invites", methods=["GET"])
 @jwt_required
 def list_pending_invites():
-    user = _current_user()
-
     org_id = request.args.get("organization_id", type=int)
     if not org_id:
         return jsonify({"error": "organization_id is required"}), 400
 
-    if not _is_org_admin(user.id, org_id):
+    if not is_org_admin(org_id):
         return jsonify({"error": "Forbidden"}), 403
 
     invites = (
-        Membership.query.filter_by(organization_id=org_id, status='Pending')
+        Membership.query.filter_by(organization_id=org_id, status="Pending")
         .join(User, Membership.user_id == User.id)
         .all()
     )
@@ -304,7 +304,6 @@ def list_pending_invites():
             "organization_id": m.organization_id,
             "role": m.role,
             "status": m.status,
-            "invite_token": m.invite_token,
         }
         for m in invites
     ]), 200

@@ -10,13 +10,12 @@ os.environ.setdefault(
 )
 
 import cv2
-import numpy as np
 from io import BytesIO
 from PIL import Image
 
 def capture_rtsp_screenshot(rtsp_url):
     """
-    Captures a screenshot from an RTSP video stream, resizes it to 720p (1280x720), 
+    Captures a screenshot from an RTSP video stream, resizes it to 720p (1280x720),
     and returns it as a BytesIO object.
 
     Args:
@@ -29,7 +28,7 @@ def capture_rtsp_screenshot(rtsp_url):
     # (the timeout set above) applies.
     cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
-        raise RuntimeError(f"Error: Unable to open video stream from {rtsp_url}")
+        raise RuntimeError("Error: Unable to open video stream")
 
     # Read a single frame
     ret, frame = cap.read()

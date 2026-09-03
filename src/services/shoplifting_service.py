@@ -4,11 +4,11 @@ from src.celery_worker import celery
 import collections
 import os
 from ultralytics import YOLO
-import time
 from ultralytics.utils import LOGGER
 from celery.contrib.abortable import AbortableTask
 from src.services.local_storage import save_video_clip_async
 from src.services.stream_utils import display_frame, setup_window, teardown_windows
+from src.services.stream_security import mask_credentials
 
 LOGGER.setLevel("ERROR")
 
@@ -31,7 +31,7 @@ SHOPLIFTING_FRAME_SKIP = max(1, int(os.getenv("SHOPLIFTING_FRAME_SKIP", "2")))
 
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_detect_shoplifting")
 def detect_shoplifting_async(self, rtsp_url, camera_id=None):
-    print(f"Starting detect shoplifting for {rtsp_url}")
+    print(f"Starting detect shoplifting for {mask_credentials(rtsp_url)}")
     cap = None
 
     try:
@@ -41,7 +41,7 @@ def detect_shoplifting_async(self, rtsp_url, camera_id=None):
         if not cap.isOpened():
             print("Error: Could not open video stream.")
             return
-            
+
         # Get video properties
         FRAME_RATE = int(cap.get(cv2.CAP_PROP_FPS) or 0)
         if FRAME_RATE <= 0 or FRAME_RATE > 120:
@@ -66,7 +66,7 @@ def detect_shoplifting_async(self, rtsp_url, camera_id=None):
 
         # Desktop preview window (no-op when running headless on a server)
         setup_window("Shoplifting Detection", cv2.WINDOW_AUTOSIZE)
-        
+
         while cap.isOpened():
             # Check if the task has been aborted
             if self.is_aborted():
@@ -95,7 +95,11 @@ def detect_shoplifting_async(self, rtsp_url, camera_id=None):
                 names = model.names  # Class names dictionary
 
                 for i, conf in enumerate(confidences):
-                    if names[int(class_ids[i])] == "Shoplifting": print(f"========== Shoplifting Detected at Frame {frame_count} with {conf} confidences ==========")
+                    if names[int(class_ids[i])] == "Shoplifting":
+                        print(
+                            f"========== Shoplifting Detected at Frame {frame_count} "
+                            f"with {conf} confidences =========="
+                        )
                     if conf >= 0.3:  # Check confidence threshold
                         detected_class = names[int(class_ids[i])]
                         if detected_class == "Shoplifting" and not recording:
@@ -138,7 +142,7 @@ def detect_shoplifting_async(self, rtsp_url, camera_id=None):
 
     except Exception as e:
         print(f"Error in shoplifting detection: {e}")
-        
+
     finally:
         if cap is not None:  # Only release cap if it was initialized
             cap.release()

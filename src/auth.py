@@ -24,6 +24,7 @@ EXEMPT_PATHS = frozenset({"/", "/healthz", "/readyz"})
 EXEMPT_PREFIXES = ("/static/",)
 
 JWT_ALGORITHM = "HS256"
+JWT_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "12"))
 
 
 def _configured_api_key() -> str:
@@ -61,10 +62,11 @@ def _extract_bearer_token():
 
 
 def _get_jwt_secret() -> str:
-    secret = os.getenv("JWT_SECRET_KEY", "").strip()
-    if not secret:
-        return ""
-    return secret
+    return (os.getenv("JWT_SECRET_KEY") or "").strip()
+
+
+def jwt_configured() -> bool:
+    return bool(_get_jwt_secret())
 
 
 def _has_valid_jwt() -> bool:
@@ -75,14 +77,18 @@ def _has_valid_jwt() -> bool:
     if not secret:
         return False
     try:
-        payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+        jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
         return True
-    except Exception:
+    except jwt.InvalidTokenError:
         return False
 
 
 def create_access_token(user_id: int, email: str, name: str, organization_id: int | None = None) -> str:
     """Return a signed JWT for the given user."""
+    secret = _get_jwt_secret()
+    if not secret:
+        raise RuntimeError("JWT_SECRET_KEY is not configured")
+
     now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "sub": str(user_id),
@@ -90,13 +96,47 @@ def create_access_token(user_id: int, email: str, name: str, organization_id: in
         "name": name,
         "org": organization_id,
         "iat": now,
-        "exp": now + datetime.timedelta(hours=12),
+        "exp": now + datetime.timedelta(hours=JWT_TTL_HOURS),
     }
-    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
 def decode_token(token: str) -> dict:
-    return jwt.decode(token, _get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    secret = _get_jwt_secret()
+    if not secret:
+        raise jwt.InvalidTokenError("JWT_SECRET_KEY is not configured")
+    return jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
+
+
+def _bind_user_from_payload(payload: dict):
+    from src.models.user import User
+    from src.models.membership import Membership
+
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError):
+        return None, None
+
+    user = User.query.filter_by(id=user_id, status="Active").first()
+    if not user:
+        return None, None
+
+    org_id = payload.get("org")
+    if org_id is not None:
+        try:
+            org_id = int(org_id)
+        except (TypeError, ValueError):
+            org_id = None
+
+    if org_id is not None:
+        membership = Membership.query.filter_by(
+            user_id=user.id, organization_id=org_id, status="Active"
+        ).first()
+        if not membership:
+            # Membership revoked or forged claim: keep the user, drop org scope.
+            org_id = None
+
+    return user, org_id
 
 
 def register_api_key_auth(app):
@@ -143,13 +183,12 @@ def jwt_required(fn):
         except jwt.InvalidTokenError:
             return jsonify({"error": "Invalid token"}), 401
 
-        from src.models.user import User
-        user = User.query.filter_by(id=int(payload["sub"]), status='Active').first()
+        user, org_id = _bind_user_from_payload(payload)
         if not user:
             return jsonify({"error": "User not found"}), 401
 
         g.current_user = user
-        g.current_org_id = payload.get("org")
+        g.current_org_id = org_id
         return fn(*args, **kwargs)
 
     return wrapper
@@ -163,13 +202,26 @@ def optional_jwt(fn):
         if token:
             try:
                 payload = decode_token(token)
-                from src.models.user import User
-                user = User.query.filter_by(id=int(payload["sub"]), status='Active').first()
+                user, org_id = _bind_user_from_payload(payload)
                 if user:
                     g.current_user = user
-                    g.current_org_id = payload.get("org")
-            except Exception:
+                    g.current_org_id = org_id
+            except jwt.InvalidTokenError:
                 pass
         return fn(*args, **kwargs)
 
     return wrapper
+
+
+def require_stream_or_snapshot_auth():
+    """Auth for browser ``<img>`` endpoints: JWT, ``?token=``, or shared API key."""
+    current_user = getattr(g, "current_user", None)
+    if current_user:
+        return None
+
+    expected = _configured_api_key()
+    presented = _extract_presented_key()
+    if expected and presented and hmac.compare_digest(presented, expected):
+        return None
+
+    return jsonify({"error": "Unauthorized"}), 401

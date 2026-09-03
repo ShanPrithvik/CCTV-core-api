@@ -6,9 +6,11 @@ load_dotenv()
 
 from src.init import create_app
 
+from src.config.redis_config import get_redis_url
+
 app = create_app()
 
-REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+REDIS_URL = get_redis_url()
 
 app.config.update(
     broker_url=REDIS_URL,

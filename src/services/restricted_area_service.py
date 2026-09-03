@@ -9,6 +9,7 @@ from celery.contrib.abortable import AbortableTask
 import collections
 from src.services.local_storage import save_video_clip_async
 from src.services.stream_utils import display_frame, setup_window, teardown_windows
+from src.services.stream_security import mask_credentials
 
 LOGGER.setLevel("ERROR")
 
@@ -31,7 +32,7 @@ DETECTION_FRAME_SKIP = max(1, int(os.getenv("DETECTION_FRAME_SKIP", "3")))
 @celery.task(bind=True, base=AbortableTask, name="tasks.process_restricted_area")
 def restricted_area_async(self, rtsp_url, camera_id, roi):
     print("===== Celery Task Started for Restricted Area Detection =====")
-    print(f"Starting restricted area detection for {rtsp_url}")
+    print(f"Starting restricted area detection for {mask_credentials(rtsp_url)}")
     log_file_path = "logs/restricted_area_alerts.txt"
     os.makedirs(os.path.dirname(log_file_path), exist_ok=True)
     cap = None
@@ -41,13 +42,13 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
 
         cap = cv2.VideoCapture(rtsp_url)
         if not cap.isOpened():
-            raise RuntimeError(f"Error: Unable to open video stream from {rtsp_url}")
+            raise RuntimeError("Error: Unable to open video stream")
         # Try to keep internal buffering minimal to reduce latency
         try:
             cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         except Exception:
             pass
-         
+
         # Create a display window (no-op when running headless on a server)
         setup_window("Restricted Area Monitoring")
 
@@ -83,13 +84,13 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
             if not ret:
                 print("End of video or unable to read frame.")
                 break
- 
+
             frame = cv2.resize(frame, (1280, 720))
 
             # Update counters and ring buffer
             frame_count += 1
             video_queue.append(frame)
- 
+
             # Draw the ROI polygon on the frame
             cv2.polylines(frame, [pts], isClosed=True, color=(0, 0, 255), thickness=2)
 
@@ -107,7 +108,7 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
                         center_x = (rx1 + rx2) // 2
                         center_y = (ry1 + ry2) // 2
 
-                        if mask[center_y, center_x] > 0:
+                        if 0 <= center_y < mask.shape[0] and 0 <= center_x < mask.shape[1] and mask[center_y, center_x] > 0:
                             # Draw bounding box and log alert
                             cv2.rectangle(frame, (rx1, ry1), (rx2, ry2), (0, 255, 0), 2)
                             cv2.putText(frame, f"ALERT: {label} in restricted area", (rx1, ry1 - 10),
@@ -149,7 +150,7 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
 
     except Exception as e:
         print(f"Error in restricted area monitoring: {e}")
-        
+
     finally:
         if cap is not None:  # Only release cap if it was initialized
             cap.release()

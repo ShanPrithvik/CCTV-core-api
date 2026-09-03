@@ -1,4 +1,4 @@
-from src.init import db, ma
+from src.init import db
 
 class RuleConfig(db.Model):
     __tablename__ = 'RuleConfig'
@@ -10,11 +10,13 @@ class RuleConfig(db.Model):
     name = db.Column(db.String(255), nullable=False)  
     status = db.Column(db.Enum('Active', 'Inactive'), default='Active', nullable=False)
     task_id = db.Column(db.String(255), nullable=True)
+    organization_id = db.Column(db.Integer, nullable=True)
     
     rule_types = db.relationship('RuleTypes', backref='ruleconfig', lazy=True)
 
-    def __init__(self, camera_id, model_type, roi_coordinates, name):
+    def __init__(self, camera_id, model_type, roi_coordinates, name, organization_id=None):
         self.camera_id = camera_id
         self.model_type = model_type
         self.roi_coordinates = roi_coordinates
         self.name = name
+        self.organization_id = organization_id

@@ -6,6 +6,7 @@ flask-marshmallow
 marshmallow-sqlalchemy
 python-dotenv
 gunicorn
+PyJWT
 
 # opencv-python-headless has no GUI/display dependencies, which matches the
 # HEADLESS-by-default detection services and is what most servers/containers

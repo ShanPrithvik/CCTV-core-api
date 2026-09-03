@@ -47,7 +47,10 @@ services:
     build: .
     restart: unless-stopped
     env_file:
-      - .env
+      # Optional so `docker compose config` works in CI, where .env (gitignored,
+      # holds real secrets) does not exist. Compose still reads it when present.
+      - path: .env
+        required: false
     environment:
       - SQLITE_PATH=/app/data/cctv.db
       # Inside Compose the broker hostname is the service name, not localhost.
@@ -68,7 +71,8 @@ services:
     build: .
     restart: unless-stopped
     env_file:
-      - .env
+      - path: .env
+        required: false
     environment:
       - SQLITE_PATH=/app/data/cctv.db
       - REDIS_URL=redis://redis:6379/0

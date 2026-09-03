@@ -9,7 +9,6 @@ concurrency:
 
 permissions:
   contents: read
-  pull-requests: write
 
 jobs:
   review:
@@ -18,7 +17,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/dependency-review-action@v4
+      - uses: actions/setup-python@v7
         with:
-          fail-on-severity: high
-          comment-summary-in-pr: true
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+
+      - name: Install pip-audit
+        run: pip install pip-audit
+
+      # actions/dependency-review-action needs GitHub's Dependency graph, which
+      # is disabled for this repository, so it fails with "Dependency review is
+      # not supported on this repository". pip-audit checks the same Python
+      # supply chain against the PyPI/OSV advisory databases instead.
+      - name: Audit declared Python dependencies
+        run: pip-audit -r requirements-ci.txt --progress-spinner off

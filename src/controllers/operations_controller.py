@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
+import os
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, g, jsonify, request, send_file
 
 from src.auth import jwt_required
 from src.init import db
@@ -27,8 +28,7 @@ def _event_payload(event):
         "confidence": event.confidence,
         "occurred_at": _iso(event.occurred_at),
         "ended_at": _iso(event.ended_at),
-        "snapshot_path": event.snapshot_path,
-        "clip_path": event.clip_path,
+        "has_clip": bool(event.clip_path),
         "metadata": event.event_metadata or {},
     }
 
@@ -45,6 +45,21 @@ def _alert_payload(alert):
         "event": _event_payload(alert.event),
     }
     return payload
+
+
+def _safe_clip_path(stored_path):
+    """Return an absolute clip path only if it lives under SAVED_CLIPS_DIR."""
+    if not stored_path:
+        return None
+    clips_dir = os.path.abspath(os.getenv("SAVED_CLIPS_DIR", "saved_clips"))
+    resolved = os.path.abspath(stored_path)
+    if resolved != clips_dir and not resolved.startswith(clips_dir + os.sep):
+        return None
+    if os.path.splitext(resolved)[1].lower() != ".mp4":
+        return None
+    if not os.path.isfile(resolved):
+        return None
+    return resolved
 
 
 def _health_payload(health):
@@ -162,6 +177,32 @@ def update_alert(alert_id):
         alert.resolved_at = now if status == "RESOLVED" else None
     db.session.commit()
     return jsonify(_alert_payload(alert)), 200
+
+
+@operations_bp.route("/api/alerts/<int:alert_id>/clip", methods=["GET"])
+@jwt_required
+def get_alert_clip(alert_id):
+    denied = require_active_org()
+    if denied:
+        return denied
+
+    alert = Alert.query.filter_by(
+        id=alert_id, organization_id=g.current_org_id
+    ).first()
+    if not alert:
+        return jsonify({"error": "Alert not found"}), 404
+
+    clip_path = _safe_clip_path(alert.event.clip_path if alert.event else None)
+    if not clip_path:
+        return jsonify({"error": "Clip not available"}), 404
+
+    return send_file(
+        clip_path,
+        mimetype="video/mp4",
+        as_attachment=False,
+        download_name=os.path.basename(clip_path),
+        max_age=0,
+    )
 
 
 @operations_bp.route("/api/camera-health", methods=["GET"])

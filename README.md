@@ -173,6 +173,7 @@ Rule updates are available at
 | `GET` | `/api/events` | List structured events for the active organization |
 | `GET` | `/api/alerts` | List alerts; optionally filter by `status` |
 | `PATCH` | `/api/alerts/<alert_id>` | Set status to `NEW`, `ACKNOWLEDGED`, or `RESOLVED` |
+| `GET` | `/api/alerts/<alert_id>/clip` | Stream the evidence MP4 for an alert in the active organization |
 | `GET` | `/api/camera-health` | List current analytics-frame health signals |
 
 Camera health is intentionally reported as an **analytics-frame signal** in
@@ -223,5 +224,5 @@ This is a single-stream, CPU-only (`yolov8n`) setup meant to prove the pipeline 
 ## Notes
 
 - CORS defaults to `*`; set `CORS_ALLOWED_ORIGINS` to your frontend's origin in production.
-- Alerts are written to `logs/overcrowding_alerts.txt` and `logs/restricted_area_alerts.txt`.
+- Alerts are persisted as structured `Event`/`Alert` rows (restricted-area and overcrowding). Text logs remain as a backup.
 - `HEADLESS=false` (desktop preview windows) is only meaningful on your own machine with a display; servers and containers should always use the default `HEADLESS=true`.

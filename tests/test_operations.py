@@ -19,7 +19,7 @@ def _headers(token):
     return {"Authorization": f"Bearer {token}"}
 
 
-def _seed_alert(app, org_id, camera_name="Loading dock"):
+def _seed_alert(app, org_id, camera_name="Loading dock", clip_path=None, event_type="person_entered_restricted_zone"):
     with app.app_context():
         camera = Camera(
             camera_name=camera_name,
@@ -32,9 +32,10 @@ def _seed_alert(app, org_id, camera_name="Loading dock"):
         event = Event(
             organization_id=org_id,
             camera_id=camera.id,
-            event_type="person_entered_restricted_zone",
+            event_type=event_type,
             severity="HIGH",
             confidence=0.91,
+            clip_path=clip_path,
             event_metadata={"zone": "Stockroom"},
         )
         db.session.add(event)
@@ -104,3 +105,45 @@ def test_operations_are_tenant_scoped(client, app, monkeypatch):
 
     own = client.get("/api/alerts", headers=_headers(token_a))
     assert len(own.get_json()) == 1
+
+
+def test_alert_clip_is_tenant_scoped(client, app, tmp_path, monkeypatch):
+    clips_dir = tmp_path / "saved_clips"
+    clips_dir.mkdir()
+    clip = clips_dir / "overcrowding_1.mp4"
+    clip.write_bytes(b"fake-mp4")
+    monkeypatch.setenv("SAVED_CLIPS_DIR", str(clips_dir))
+
+    token_a, org_a = _register(client, "clip-a@example.com", "Clip A")
+    token_b, _ = _register(client, "clip-b@example.com", "Clip B")
+    _, alert_id = _seed_alert(
+        app,
+        org_a,
+        clip_path=str(clip),
+        event_type="overcrowding_detected",
+    )
+
+    listed = client.get("/api/alerts", headers=_headers(token_a))
+    assert listed.get_json()[0]["event"]["has_clip"] is True
+    assert "clip_path" not in listed.get_json()[0]["event"]
+
+    own = client.get(f"/api/alerts/{alert_id}/clip", headers=_headers(token_a))
+    assert own.status_code == 200
+    assert own.data == b"fake-mp4"
+
+    other = client.get(f"/api/alerts/{alert_id}/clip", headers=_headers(token_b))
+    assert other.status_code == 404
+
+
+def test_alert_clip_rejects_path_escape(client, app, tmp_path, monkeypatch):
+    clips_dir = tmp_path / "saved_clips"
+    clips_dir.mkdir()
+    secret = tmp_path / "secret.mp4"
+    secret.write_bytes(b"nope")
+    monkeypatch.setenv("SAVED_CLIPS_DIR", str(clips_dir))
+
+    token, org_id = _register(client, "escape@example.com", "Escape Org")
+    _, alert_id = _seed_alert(app, org_id, clip_path=str(secret))
+
+    response = client.get(f"/api/alerts/{alert_id}/clip", headers=_headers(token))
+    assert response.status_code == 404

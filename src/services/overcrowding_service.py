@@ -8,6 +8,7 @@ from src.celery_worker import celery
 from celery.contrib.abortable import AbortableTask
 import collections
 from src.services.local_storage import save_video_clip_async
+from src.services.event_service import record_detection_event
 from src.services.stream_security import mask_credentials
 from src.services.stream_utils import (
     display_frame,
@@ -75,6 +76,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
         recording = False
         frames_to_save = []
         save_start_frame_count = 0
+        pending_clip_path = None
         frame_count = 0
         output_folder = os.getenv("SAVED_CLIPS_DIR", "saved_clips")
         os.makedirs(output_folder, exist_ok=True)
@@ -153,11 +155,26 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                     print(message)
                     with open(log_file_path, "a") as f:
                         f.write(message + "\n")
-                    # Start saving clip with pre-roll if not already recording
                     if not recording:
                         recording = True
                         frames_to_save = list(video_queue)
                         save_start_frame_count = frame_count
+                        pending_clip_path = os.path.join(
+                            output_folder,
+                            f"overcrowding_{camera_id}_{int(time.time())}.mp4",
+                        )
+                        record_detection_event(
+                            camera_id=camera_id,
+                            event_type="overcrowding_detected",
+                            severity="MEDIUM",
+                            clip_path=pending_clip_path,
+                            metadata={
+                                "source": "crowd_detection",
+                                "person_count": person_count,
+                                "max_people": max_people,
+                                "lookout_seconds": alert_threshold,
+                            },
+                        )
 
             else:
                 if alert_timer is not None:
@@ -173,7 +190,9 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                 frames_to_save.append(frame)
                 if frame_count - save_start_frame_count >= AFTER_BUFFER_SIZE:
                     recording = False
-                    filename = os.path.join(output_folder, f"overcrowding_{camera_id}_{int(time.time())}.mp4")
+                    filename = pending_clip_path or os.path.join(
+                        output_folder, f"overcrowding_{camera_id}_{int(time.time())}.mp4"
+                    )
                     save_video_clip_async(
                         frames=frames_to_save,
                         fps=FRAME_RATE,
@@ -186,6 +205,7 @@ def overcrowd_area_async(self, rtsp_url, camera_id, roi, rule_types):
                     )
                     print(f"Saving asynchronously: {filename}")
                     frames_to_save.clear()
+                    pending_clip_path = None
 
         # Blinking alert overlay (outside the logic above)
             if alert_active:

@@ -177,7 +177,9 @@ def restricted_area_async(self, rtsp_url, camera_id, roi):
                     pending_clip_path = None
 
             # Show window (desktop) or publish frame for live streaming (headless)
-            if display_frame("Restricted Area Monitoring", frame, camera_id=camera_id):
+            if display_frame(
+                "Restricted Area Monitoring", frame, camera_id=camera_id, owner=self.request.id
+            ):
                 print("User quit with 'q'.")
                 break
 

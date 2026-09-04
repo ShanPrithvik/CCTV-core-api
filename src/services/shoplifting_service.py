@@ -112,7 +112,9 @@ def detect_shoplifting_async(self, rtsp_url, camera_id=None):
 
 
             # Show window (desktop) or publish frame for live streaming (headless)
-            if display_frame("Shoplifting Detection", frame, camera_id=camera_id):
+            if display_frame(
+                "Shoplifting Detection", frame, camera_id=camera_id, owner=self.request.id
+            ):
                 print("User quit with 'q'.")
                 break
 

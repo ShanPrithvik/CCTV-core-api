@@ -12,7 +12,7 @@ logger = logging.getLogger("cctv.rule")
 
 
 def _detection_task(model_type_value):
-    """Import Celery tasks lazily so API tests/CI do not load YOLO/torch."""
+    """Legacy per-rule tasks. Kept so in-flight jobs can still be aborted."""
     if model_type_value == ModelType.CROWD_DETECTION.value:
         from src.services.overcrowding_service import overcrowd_area_async
         return overcrowd_area_async
@@ -24,7 +24,11 @@ def _detection_task(model_type_value):
         return restricted_area_async
     return None
 
-logger = logging.getLogger("cctv.rule")
+
+def _pipeline_task():
+    """Import lazily so API tests/CI do not load YOLO/torch."""
+    from src.services.camera_pipeline_service import process_camera_pipeline
+    return process_camera_pipeline
 
 
 def _validated_roi(roi):
@@ -48,16 +52,70 @@ def _validated_roi(roi):
 
 
 
-def _abort_task(rule_config):
-    if not rule_config.task_id:
+def _abort_by_id(task_id, model_type=None):
+    if not task_id:
         return
     try:
-        task = _detection_task(rule_config.model_type)
-        if task is None:
-            return
-        task.AsyncResult(rule_config.task_id).abort()
+        _pipeline_task().AsyncResult(task_id).abort()
     except Exception:
-        logger.exception("Error aborting Celery task")
+        logger.exception("Error aborting camera pipeline")
+    try:
+        legacy = _detection_task(model_type) if model_type else None
+        if legacy is not None:
+            legacy.AsyncResult(task_id).abort()
+    except Exception:
+        logger.exception("Error aborting legacy detection task")
+
+
+def _abort_task(rule_config):
+    _abort_by_id(getattr(rule_config, "task_id", None), getattr(rule_config, "model_type", None))
+
+
+def _active_rules_for_camera(camera_id):
+    return RuleConfig.query.filter_by(camera_id=camera_id, status="Active").all()
+
+
+def _signal_pipeline_reload(camera_id):
+    from src.services.stream_utils import bump_rules_epoch
+
+    bump_rules_epoch(camera_id)
+
+
+def _ensure_camera_pipeline(camera):
+    """One running task per camera, shared by every Active rule on it."""
+    from src.services.stream_utils import (
+        clear_camera_pipeline_task_id,
+        get_camera_pipeline_task_id,
+        set_camera_pipeline_task_id,
+    )
+
+    siblings = _active_rules_for_camera(camera.id)
+    if not siblings:
+        return
+
+    pipeline_id = get_camera_pipeline_task_id(camera.id)
+    if pipeline_id and any(rule.task_id == pipeline_id for rule in siblings):
+        for rule in siblings:
+            rule.task_id = pipeline_id
+        db.session.commit()
+        _signal_pipeline_reload(camera.id)
+        return
+
+    aborted = set()
+    for rule in siblings:
+        if rule.task_id and rule.task_id not in aborted:
+            _abort_by_id(rule.task_id, rule.model_type)
+            aborted.add(rule.task_id)
+    if pipeline_id and pipeline_id not in aborted:
+        _abort_by_id(pipeline_id)
+    clear_camera_pipeline_task_id(camera.id)
+
+    task = _pipeline_task().delay(camera.rtsp_url, camera.id)
+    set_camera_pipeline_task_id(camera.id, task.id)
+    for rule in siblings:
+        rule.task_id = task.id
+    db.session.commit()
+    _signal_pipeline_reload(camera.id)
 
 
 def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id=None):
@@ -147,8 +205,6 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
         rule_config.name = name
         rule_config.model_type = model_type_enum.value
         rule_config.organization_id = organization_id
-        _abort_task(rule_config)
-        rule_config.task_id = None
         RuleTypes.query.filter_by(ruleconfig_id=rule_config.id).delete()
     else:
         rule_config = RuleConfig(
@@ -173,26 +229,13 @@ def save_rule_for_camera(camera_id, data, organization_id=None, existing_rule_id
 
     db.session.commit()
 
-    # --- Dispatch the detection task ---
     try:
-        task_fn = _detection_task(model_type_enum.value)
-        if task_fn is None:
-            task = None
-        elif model_type_enum == ModelType.CROWD_DETECTION:
-            task = task_fn.delay(camera.rtsp_url, camera_id, dispatch_roi, dispatch_rule_types)
-        elif model_type_enum == ModelType.SHOPLIFTING:
-            task = task_fn.delay(camera.rtsp_url, camera_id)
-        else:
-            task = task_fn.delay(camera.rtsp_url, camera_id, dispatch_roi)
-
-        if task is not None:
-            rule_config.task_id = task.id
-            db.session.commit()
+        _ensure_camera_pipeline(camera)
     except RuntimeError:
-        logger.exception("Error triggering detection task")
+        logger.exception("Error triggering camera pipeline")
         raise ValueError("Failed to start detection")
     except Exception:
-        logger.exception("Error triggering detection task")
+        logger.exception("Error triggering camera pipeline")
 
     response = {
         "cameraId": rule_config.camera_id,
@@ -258,9 +301,21 @@ def remove_camera_rule(camera_id, rule_id):
         if not rule:
             return {"error": "Rule not found for the specified camera"}, 404
 
-        _abort_task(rule)
+        others = [
+            sibling
+            for sibling in _active_rules_for_camera(camera_id)
+            if sibling.id != rule.id
+        ]
+        if others:
+            _signal_pipeline_reload(camera_id)
+        else:
+            _abort_task(rule)
+            from src.services.stream_utils import clear_camera_pipeline_task_id
+
+            clear_camera_pipeline_task_id(camera_id)
 
         rule.status = "Inactive"
+        rule.task_id = None
         db.session.commit()
 
         return {

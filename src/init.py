@@ -98,6 +98,34 @@ def create_app():
         if auto_create:
             db.create_all()
 
+        # A rule's detection task runs until the rule is disabled, so restarting
+        # the worker leaves rows claiming 'Active' with nothing behind them.
+        # Skipped unless a worker actually answers, so booting the API before
+        # the worker cannot mass-deactivate rules.
+        reconcile_on_startup = os.getenv(
+            "RECONCILE_RULES_ON_STARTUP", "true"
+        ).strip().lower() in ("1", "true", "yes")
+        if reconcile_on_startup:
+            from src.services.rule_reconciliation import reconcile_rule_tasks
+
+            result = reconcile_rule_tasks()
+            if result["deactivated"]:
+                logger.warning(
+                    "Deactivated %s rule(s) with no running detection task",
+                    result["deactivated"],
+                )
+
+    @app.cli.command("reconcile-rules")
+    def reconcile_rules_command():
+        """Deactivate rules whose Celery detection task is no longer running."""
+        from src.services.rule_reconciliation import reconcile_rule_tasks
+
+        result = reconcile_rule_tasks()
+        if result["skipped"]:
+            print("Skipped: no Celery worker responded.")
+        else:
+            print(f"Deactivated {result['deactivated']} stale rule(s).")
+
     from src.routes import init_routes
     init_routes(app)
 

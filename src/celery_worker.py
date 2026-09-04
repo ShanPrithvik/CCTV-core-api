@@ -30,6 +30,7 @@ def create_celery():
     # submodule), so this actually registers the @celery.task functions
     # with the worker process.
     celery.autodiscover_tasks([
+        "src.services.camera_pipeline_service",
         "src.services.shoplifting_service",
         "src.services.overcrowding_service",
         "src.services.restricted_area_service",

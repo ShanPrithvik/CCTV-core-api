@@ -16,8 +16,8 @@ camera_bp = Blueprint("camera_bp", __name__)
 logger = logging.getLogger("cctv.camera")
 
 IMAGE_DIR = os.path.abspath(os.getenv("CAMERA_SNAPSHOT_DIR", "cctv_snip"))
-STREAM_POLL_INTERVAL = 0.2
-STREAM_IDLE_TIMEOUT = 15
+STREAM_POLL_INTERVAL = float(os.getenv("STREAM_POLL_INTERVAL", "0.05"))
+STREAM_IDLE_TIMEOUT = float(os.getenv("STREAM_IDLE_TIMEOUT", "15"))
 
 
 @camera_bp.route("/api/camera", methods=["POST"])
@@ -161,27 +161,38 @@ def stream_camera(camera_id):
             return jsonify({"error": "Forbidden"}), 403
 
     def generate():
-        last_frame = None
+        last_sent = None
         idle_since = None
         while True:
             frame_bytes = get_latest_frame(camera_id)
 
             if frame_bytes is None:
-                if last_frame is None:
-                    time.sleep(STREAM_POLL_INTERVAL)
-                    if idle_since is None:
-                        idle_since = time.time()
-                    elif time.time() - idle_since > STREAM_IDLE_TIMEOUT:
-                        break
-                    continue
-                frame_bytes = last_frame
-            else:
-                last_frame = frame_bytes
-                idle_since = None
+                # Published frames carry a short TTL, so a missing key means the
+                # detection task has stopped. End the response instead of
+                # holding the socket (and one of the browser's six per-origin
+                # connections) open forever re-sending a stale frame.
+                if idle_since is None:
+                    idle_since = time.time()
+                elif time.time() - idle_since > STREAM_IDLE_TIMEOUT:
+                    break
+                time.sleep(STREAM_POLL_INTERVAL)
+                continue
 
+            idle_since = None
+
+            # Polling is faster than the publish rate, so most reads return the
+            # frame we already sent. Re-sending it burns bandwidth without
+            # changing the picture.
+            if frame_bytes == last_sent:
+                time.sleep(STREAM_POLL_INTERVAL)
+                continue
+
+            last_sent = frame_bytes
             yield (
                 b"--frame\r\n"
-                b"Content-Type: image/jpeg\r\n\r\n" + frame_bytes + b"\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                b"Content-Length: " + str(len(frame_bytes)).encode() + b"\r\n\r\n"
+                + frame_bytes + b"\r\n"
             )
             time.sleep(STREAM_POLL_INTERVAL)
 

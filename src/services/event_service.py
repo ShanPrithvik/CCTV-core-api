@@ -13,6 +13,16 @@ _worker_app = None
 _worker_app_lock = threading.Lock()
 
 
+def worker_app():
+    """Flask app bound to the same database the API uses.
+
+    Celery workers are not the Flask process, so they need this context to
+    read rules and write events without importing create_app (which would
+    start HTTP middleware on every worker).
+    """
+    return _get_worker_app()
+
+
 def _get_worker_app():
     global _worker_app
     if _worker_app is not None:
